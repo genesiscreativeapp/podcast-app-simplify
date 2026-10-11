@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 
-# ffmpeg (avec libopus et libmp3lame) + libsndfile pour soundfile
+# ffmpeg (avec libmp3lame) + libsndfile pour soundfile
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg libsndfile1 ca-certificates \
  && rm -rf /var/lib/apt/lists/*

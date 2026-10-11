@@ -2,10 +2,10 @@
 
 Transforme automatiquement un culte YouTube en podcast de prédication, prêt à partager sur WhatsApp et Telegram.
 
-**Lien YouTube → téléchargement audio → repérage de la prédication → amélioration de la voix → suppression des silences, « euh » et répétitions → intro → compression Opus/MP3 → Cloudflare R2**
+**Lien YouTube → téléchargement audio → repérage de la prédication → amélioration de la voix → suppression des silences, « euh » et répétitions → intro → compression MP3 → Cloudflare R2**
 
 L'interface web permet de classer les traitements dans des dossiers et sous-dossiers (ex. `CULTE ROYAL / Octobre 2026`).
-Chaque fichier est nommé `Nom_AAAA-MM-JJ.ogg` à partir du nom et de la date saisis avec le lien.
+Chaque fichier est nommé `Nom_AAAA-MM-JJ.mp3` à partir du nom et de la date saisis avec le lien.
 
 ## Installation
 
@@ -23,10 +23,16 @@ Au premier traitement, les modèles Whisper sont téléchargés dans `data/model
 ## Utilisation
 
 1. Créer un dossier (ex. **CULTE ROYAL**), éventuellement des sous-dossiers.
-2. Déposer une **intro** : par défaut (barre latérale) ou propre à un dossier. Un sous-dossier hérite de l'intro de son parent.
+2. Ajouter vos **intros** (fichiers **MP3**) dans la bibliothèque (**🎵 Gérer les intros**, barre latérale). La première devient l'intro par défaut ; on peut en changer à tout moment. Chaque dossier peut avoir la sienne (un sous-dossier hérite de son parent), et chaque traitement peut en choisir une autre, ou aucune, dans le formulaire.
 3. Coller le lien YouTube, le nom et la date, puis **Lancer le traitement**.
-4. Suivre l'avancement en direct, écouter le résultat, télécharger l'OGG/MP3 ou copier le lien R2.
+4. Suivre l'avancement en direct, écouter le résultat, télécharger le MP3 ou copier le lien R2.
 5. Si la prédication détectée n'est pas la bonne : **Relancer** en saisissant le début et la fin (format `1:05:30`).
+
+## Historique, détails et liens directs
+
+- **🕘 Historique des traitements** (barre latérale) : tous les traitements, tous dossiers confondus, avec recherche et filtre par statut.
+- **Détails** (sur chaque traitement) : lecteur, téléchargements, informations (bornes, durées, tailles, dates), étapes et journal complet.
+- **Liens directs** : le lien R2 du MP3 se copie ou s'ouvrent depuis les détails. Avec `R2_PUBLIC_BASE_URL` ils sont permanents ; sinon ils sont signés et valables `R2_LINK_EXPIRES` secondes (7 jours), puis regénérés à chaque ouverture des détails. Sans R2, seuls les téléchargements via l'interface (avec identifiants) existent.
 
 ## Comment la prédication est repérée
 
@@ -51,7 +57,7 @@ Les répétitions d'emphase dites avec une pause (« Il est fidèle… il est fi
 Le traitement est optimisé pour les cultes de 4 h 30 et plus :
 - **repérage** : modèle `tiny`, seulement 15 s transcrites par fenêtre de 30 s (le LLM n'en lit que le début), lots traités en parallèle ;
 - **passe mot à mot** : la prédication est découpée en lots de 10 min (coupés dans un creux de parole) transcrits en parallèle, `beam_size=1` ;
-- **ffmpeg** : extraction et amélioration de la voix en un seul passage, travail en 24 kHz mono (Opus 24 kb/s n'utilise pas plus), OGG et MP3 encodés ensemble, envoi R2 en parallèle ;
+- **ffmpeg** : extraction et amélioration de la voix en un seul passage, travail en 24 kHz mono (le MP3 final, en 22 kHz, n'utilise pas plus) ;
 - **YouTube** : audio léger (≈ 50-70 kb/s) téléchargé par 4 fragments simultanés ; il est gardé en cache, donc **Relancer** ne retélécharge rien.
 
 Pour aller plus vite : saisir les bornes (le repérage disparaît), `DETECT_CLIP=10`. Pour plus de précision : `WHISPER_MODEL_DETECT=base`, `WHISPER_BEAM_EDIT=5`, `YTDLP_FORMAT=bestaudio/best`.
@@ -59,8 +65,7 @@ Les traitements sont faits un par un, dans l'ordre d'arrivée.
 
 ## Taille des fichiers
 
-Opus mono à 24 kb/s ≈ **11 Mo par heure** ; MP3 mono à 40 kb/s ≈ 18 Mo par heure.
-Pour des fichiers encore plus petits, `OPUS_BITRATE=16k` (≈ 7 Mo/h) reste très intelligible.
+MP3 mono à 40 kb/s ≈ **18 Mo par heure** (`MP3_BITRATE`). `32k` (≈ 14 Mo/h) reste intelligible pour la voix ; `48k` (≈ 22 Mo/h) est plus fidèle.
 
 ## Si YouTube bloque le serveur
 

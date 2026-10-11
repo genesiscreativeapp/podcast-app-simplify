@@ -1,10 +1,11 @@
 """Base SQLite : dossiers (arborescence) et traitements."""
 from datetime import datetime
+from pathlib import Path
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, create_engine, event
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, create_engine, event, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
-from .config import DB_PATH, INTRO_DIR
+from .config import DB_PATH
 
 engine = create_engine(
     f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False, "timeout": 30}
@@ -26,12 +27,23 @@ class Base(DeclarativeBase):
     pass
 
 
+class Intro(Base):
+    """Bibliothèque d'intros (MP3). Une seule peut être l'intro par défaut."""
+    __tablename__ = "intros"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    path: Mapped[str] = mapped_column(String(500))
+    duration: Mapped[float | None] = mapped_column(Float, nullable=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class Folder(Base):
     __tablename__ = "folders"
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(200))
     parent_id: Mapped[int | None] = mapped_column(ForeignKey("folders.id"), nullable=True)
-    intro_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    intro_id: Mapped[int | None] = mapped_column(nullable=True)  # intro de la bibliothèque (sinon : parent)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -43,6 +55,9 @@ class Job(Base):
     title: Mapped[str] = mapped_column(String(300))
     date: Mapped[str] = mapped_column(String(10))  # AAAA-MM-JJ
     filename: Mapped[str] = mapped_column(String(400))  # sans extension
+
+    # Intro choisie : NULL = automatique (dossier, sinon défaut) ; 0 = aucune ; sinon id dans la bibliothèque
+    intro_id: Mapped[int | None] = mapped_column(nullable=True)
 
     # Bornes forcées par l'utilisateur (secondes) — sinon détection auto
     start_override: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -61,11 +76,8 @@ class Job(Base):
     duration_source: Mapped[float | None] = mapped_column(Float, nullable=True)
     duration_output: Mapped[float | None] = mapped_column(Float, nullable=True)
 
-    local_ogg: Mapped[str | None] = mapped_column(String(500), nullable=True)
     local_mp3: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    size_ogg: Mapped[int | None] = mapped_column(Integer, nullable=True)
     size_mp3: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    r2_key_ogg: Mapped[str | None] = mapped_column(String(800), nullable=True)
     r2_key_mp3: Mapped[str | None] = mapped_column(String(800), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -75,6 +87,12 @@ class Job(Base):
 
 def init_db() -> None:
     Base.metadata.create_all(engine)
+    # Bases créées avant la bibliothèque d'intros : ajoute les colonnes manquantes
+    with engine.begin() as conn:
+        for table, col in (("jobs", "intro_id"), ("folders", "intro_id")):
+            cols = {r[1] for r in conn.execute(text(f"PRAGMA table_info({table})"))}
+            if col not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} INTEGER"))
 
 
 def folder_path(session, folder: Folder) -> list[str]:
@@ -87,13 +105,20 @@ def folder_path(session, folder: Folder) -> list[str]:
     return list(reversed(names))
 
 
-def resolve_intro(session, folder: Folder | None) -> str | None:
-    """Intro du dossier, sinon du parent le plus proche, sinon l'intro globale."""
+def resolve_intro(session, folder: Folder | None, intro_id: int | None = None) -> tuple[str, str] | None:
+    """(chemin, nom) de l'intro à utiliser : choix du traitement, sinon intro du dossier ou du parent
+    le plus proche, sinon intro par défaut. None = pas d'intro."""
+    def usable(i):
+        return i if i is not None and Path(i.path).exists() else None
+
+    if intro_id == 0:
+        return None
+    chosen = usable(session.get(Intro, intro_id)) if intro_id else None
     current, seen = folder, set()
-    while current is not None and current.id not in seen:
+    while chosen is None and current is not None and current.id not in seen:
         seen.add(current.id)
-        if current.intro_path:
-            return current.intro_path
+        chosen = usable(session.get(Intro, current.intro_id)) if current.intro_id else None
         current = session.get(Folder, current.parent_id) if current.parent_id else None
-    default = sorted(INTRO_DIR.glob("default.*"))
-    return str(default[0]) if default else None
+    if chosen is None:
+        chosen = usable(session.query(Intro).filter(Intro.is_default).first())
+    return (chosen.path, chosen.name) if chosen else None

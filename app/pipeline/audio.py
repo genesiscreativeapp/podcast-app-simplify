@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 from typing import Callable
 
-SR = 24000  # fréquence de travail : Opus 24 kb/s ne dépasse pas 8 kHz de bande, inutile de traiter plus (2x moins de calcul et de mémoire)
+SR = 24000  # fréquence de travail : le MP3 final (22 kHz) ne dépasse pas 11 kHz de bande, inutile de traiter plus (2x moins de calcul et de mémoire)
 SR_WHISPER = 16000
 
 
@@ -96,18 +96,9 @@ def _meta(title: str, artist: str, date: str) -> list[str]:
     return args
 
 
-def encode_opus(src: Path, out: Path, bitrate: str, title: str, artist: str, date: str,
-                duration: float | None = None, on_progress: Callable[[float], None] | None = None) -> None:
-    """Opus mono : la meilleure qualité vocale pour la plus petite taille."""
-    run(["ffmpeg", "-y", "-hide_banner", "-i", str(src), "-c:a", "libopus",
-         "-b:a", bitrate, "-vbr", "on", "-compression_level", "10",
-         "-ac", "1", "-ar", "48000", *_meta(title, artist, date), str(out)],
-        duration, on_progress)
-
-
 def encode_mp3(src: Path, out: Path, bitrate: str, title: str, artist: str, date: str,
                duration: float | None = None, on_progress: Callable[[float], None] | None = None) -> None:
-    """MP3 mono de secours, lisible partout."""
+    """MP3 mono : lisible partout (WhatsApp, Telegram, lecteurs de voiture…)."""
     run(["ffmpeg", "-y", "-hide_banner", "-i", str(src), "-c:a", "libmp3lame",
-         "-b:a", bitrate, "-ac", "1", "-ar", "22050",
+         "-b:a", bitrate, "-ac", "1", "-ar", "22050", "-id3v2_version", "3",
          *_meta(title, artist, date), str(out)], duration, on_progress)

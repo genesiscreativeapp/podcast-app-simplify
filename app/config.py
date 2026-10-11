@@ -63,8 +63,6 @@ REMOVE_REPEATS = _bool("REMOVE_REPEATS", True)
 REMOVE_FILLERS = _bool("REMOVE_FILLERS", True)
 
 # --- Compression -------------------------------------------------------------
-OPUS_BITRATE = _env("OPUS_BITRATE", "24k")
-MAKE_MP3 = _bool("MAKE_MP3", True)
 MP3_BITRATE = _env("MP3_BITRATE", "40k")
 PODCAST_ARTIST = _env("PODCAST_ARTIST", "")
 

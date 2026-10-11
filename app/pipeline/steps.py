@@ -11,7 +11,7 @@ STEPS = [
     ("words",    "Transcription mot à mot",         0.43, 0.85),
     ("edit",     "Montage (silences, hésitations)", 0.85, 0.90),
     ("master",   "Intro et volume",                 0.90, 0.94),
-    ("encode",   "Compression OGG / MP3",           0.94, 0.97),
+    ("encode",   "Compression MP3",           0.94, 0.97),
     ("upload",   "Envoi vers Cloudflare R2",        0.97, 1.00),
 ]
 BY_KEY = {k: (label, lo, hi) for k, label, lo, hi in STEPS}

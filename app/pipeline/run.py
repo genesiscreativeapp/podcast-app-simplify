@@ -1,9 +1,7 @@
 """Orchestration complète d'un traitement, du lien YouTube au podcast sur R2."""
 import shutil
-import threading
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -66,7 +64,7 @@ def run_job(job_id: int) -> None:
         job = s.get(Job, job_id)
         folder = s.get(Folder, job.folder_id)
         names = folder_path(s, folder) if folder else []
-        intro = resolve_intro(s, folder)
+        intro = resolve_intro(s, folder, job.intro_id)
         url, title, date, filename = job.youtube_url, job.title, job.date, job.filename
         known_title = job.video_title
         start_ov, end_ov = job.start_override, job.end_override
@@ -136,67 +134,38 @@ def run_job(job_id: int) -> None:
         # 4. Intro + normalisation du volume
         rep.step("master")
         master = work / "master.wav"
-        intro_path = Path(intro) if intro and Path(intro).exists() else None
-        if not intro_path:
-            rep.log("Aucune intro configurée : podcast sans intro")
+        intro_path = Path(intro[0]) if intro else None
+        rep.log(f"Intro : {intro[1]}" if intro else "Aucune intro : podcast sans intro")
         audio.finalize(edited, master, intro_path, on_progress=rep.sub("master"))
 
         # 6. Compression
         rep.step("encode")
         out_dir = config.OUTPUT_DIR / str(job_id)
         out_dir.mkdir(parents=True, exist_ok=True)
-        ogg = out_dir / f"{filename}.ogg"
-        mp3 = out_dir / f"{filename}.mp3" if config.MAKE_MP3 else None
-        total = audio.probe_duration(master)
-        done = {"ogg": 0.0, "mp3": 0.0}
-        encode_cb = rep.sub("encode")
-
-        def part(name):  # avancement moyen des encodages menés ensemble
-            def cb(frac):
-                done[name] = frac
-                encode_cb(sum(done.values()) / (2 if mp3 else 1))
-            return cb
-
-        with ThreadPoolExecutor(2) as ex:  # ffmpeg est mono-thread par encodage : on les lance ensemble
-            jobs = [ex.submit(audio.encode_opus, master, ogg, config.OPUS_BITRATE,
-                              title, config.PODCAST_ARTIST, date, total, part("ogg"))]
-            if mp3:
-                jobs.append(ex.submit(audio.encode_mp3, master, mp3, config.MP3_BITRATE,
-                                      title, config.PODCAST_ARTIST, date, total, part("mp3")))
-            for j in jobs:
-                j.result()
-        out_duration = audio.probe_duration(ogg)
-        rep._update(local_ogg=str(ogg), size_ogg=ogg.stat().st_size,
-                    local_mp3=str(mp3) if mp3 else None,
-                    size_mp3=mp3.stat().st_size if mp3 else None,
-                    duration_output=out_duration)
+        mp3 = out_dir / f"{filename}.mp3"
+        audio.encode_mp3(master, mp3, config.MP3_BITRATE, title, config.PODCAST_ARTIST, date,
+                         audio.probe_duration(master), rep.sub("encode"))
+        rep._update(local_mp3=str(mp3), size_mp3=mp3.stat().st_size,
+                    duration_output=audio.probe_duration(mp3))
 
         # 5. Envoi vers R2
         if storage.enabled():
             rep.step("upload")
-            key_ogg = storage.build_key(names, ogg.name)
-            key_mp3 = storage.build_key(names, mp3.name) if mp3 else None
-            size_total = ogg.stat().st_size + (mp3.stat().st_size if mp3 else 0)
-            sent, lock, upload_cb = [0], threading.Lock(), rep.sub("upload")
+            key = storage.build_key(names, mp3.name)
+            size, sent, upload_cb = max(mp3.stat().st_size, 1), [0], rep.sub("upload")
 
-            def on_bytes(n):
-                with lock:
-                    sent[0] += n
-                    upload_cb(sent[0] / max(size_total, 1))
+            def on_bytes(n):  # appelé depuis les threads de boto3
+                sent[0] += n
+                upload_cb(sent[0] / size)
 
-            with ThreadPoolExecutor(2) as ex:
-                ups = [ex.submit(storage.upload, ogg, key_ogg, "audio/ogg", on_bytes)]
-                if mp3:
-                    ups.append(ex.submit(storage.upload, mp3, key_mp3, "audio/mpeg", on_bytes))
-                for u in ups:
-                    u.result()
-            rep._update(r2_key_ogg=key_ogg, r2_key_mp3=key_mp3)
-            rep.log(f"Envoyé sur R2 : {key_ogg}")
+            storage.upload(mp3, key, "audio/mpeg", on_bytes)
+            rep._update(r2_key_mp3=key)
+            rep.log(f"Envoyé sur R2 : {key}")
         else:
             rep.log("R2 non configuré : fichiers conservés uniquement sur le serveur")
 
         elapsed = time.monotonic() - t0
-        rep.log(f"Terminé en {fmt_time(elapsed)} — {ogg.stat().st_size / 1e6:.1f} Mo (OGG)")
+        rep.log(f"Terminé en {fmt_time(elapsed)} — {mp3.stat().st_size / 1e6:.1f} Mo (MP3)")
         rep._update(status="done", step="Terminé", progress=1.0, error=None,
                     finished_at=datetime.utcnow())
     except Exception as exc:

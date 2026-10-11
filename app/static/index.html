@@ -17,6 +17,7 @@
 
   <div class="layout">
     <aside class="sidebar" id="sidebar">
+      <button class="side-link" id="historyBtn">🕘 Historique des traitements</button>
       <div class="side-head">
         <span>Dossiers</span>
         <button class="btn small" id="newRootBtn">+ Dossier</button>
@@ -25,9 +26,7 @@
       <div class="side-foot">
         <div class="label">Intro par défaut</div>
         <div id="defaultIntro" class="muted">—</div>
-        <label class="btn small ghost">Choisir un fichier
-          <input type="file" accept="audio/*" id="defaultIntroInput" hidden>
-        </label>
+        <button class="btn small ghost" id="introsBtn">🎵 Gérer les intros</button>
       </div>
     </aside>
 
@@ -39,6 +38,22 @@
         nettoyage de la voix, intro, compression et envoi sur R2.</p>
         <button class="btn" id="emptyNewBtn">+ Créer un dossier</button>
       </div>
+
+      <section id="historyView" hidden>
+        <div class="folder-head"><h1>Historique des traitements</h1></div>
+        <div class="card filters">
+          <input id="histSearch" type="search" placeholder="Rechercher (nom, titre de la vidéo, lien…)">
+          <select id="histStatus">
+            <option value="">Tous les statuts</option>
+            <option value="active">En cours / en attente</option>
+            <option value="done">Terminés</option>
+            <option value="error">En erreur</option>
+          </select>
+        </div>
+        <div id="histCount" class="hint"></div>
+        <div id="histList" class="jobs"></div>
+        <button class="btn ghost" id="histMore" hidden>Afficher plus</button>
+      </section>
 
       <section id="folderView" hidden>
         <div class="crumbs" id="crumbs"></div>
@@ -65,6 +80,9 @@
             <label>Date
               <input name="date" type="date" required>
             </label>
+            <label class="full">Intro
+              <select name="intro_id" id="jobIntroSelect"></select>
+            </label>
             <details class="full">
               <summary>Options : forcer le début et la fin de la prédication</summary>
               <div class="row">
@@ -84,15 +102,11 @@
           <div class="intro-row">
             <div>
               <h3>Intro de ce dossier</h3>
-              <div class="muted" id="folderIntro"></div>
+              <div class="muted" id="folderIntroNote"></div>
             </div>
-            <div class="actions">
-              <label class="btn small ghost">Choisir un fichier
-                <input type="file" accept="audio/*" id="folderIntroInput" hidden>
-              </label>
-              <button class="btn small ghost danger" id="removeIntroBtn" hidden>Retirer</button>
-            </div>
+            <select id="folderIntroSelect"></select>
           </div>
+          <div id="folderIntroPlayer"></div>
         </div>
 
         <h3 class="section-title">Traitements</h3>
@@ -101,12 +115,30 @@
     </main>
   </div>
 
-  <dialog id="logDialog">
+  <dialog id="detailDialog" class="wide">
     <div class="dialog-head">
-      <h3 id="logTitle">Journal</h3>
-      <button class="icon-btn" id="logClose" aria-label="Fermer">✕</button>
+      <h3 id="detailTitle">Détails</h3>
+      <button class="icon-btn" id="detailClose" aria-label="Fermer">✕</button>
     </div>
-    <pre id="logBody"></pre>
+    <div id="detailBody"></div>
+  </dialog>
+
+  <dialog id="introDialog" class="wide">
+    <div class="dialog-head">
+      <h3>Bibliothèque d'intros (MP3)</h3>
+      <button class="icon-btn" id="introClose" aria-label="Fermer">✕</button>
+    </div>
+    <p class="hint">Chaque traitement peut utiliser l'une de ces intros. Sans choix, on prend l'intro du dossier, sinon l'intro par défaut.</p>
+    <div id="introList"></div>
+    <form id="introForm" class="intro-add">
+      <div class="d-title">Ajouter une intro</div>
+      <div class="row">
+        <label>Nom <input name="name" placeholder="Intro Culte Royal"></label>
+        <label>Fichier MP3 <input name="file" type="file" accept=".mp3,audio/mpeg" required></label>
+      </div>
+      <label class="check"><input type="checkbox" name="is_default"> Utiliser comme intro par défaut</label>
+      <div class="dialog-foot"><button class="btn" type="submit">Ajouter</button></div>
+    </form>
   </dialog>
 
   <dialog id="retryDialog">
@@ -117,6 +149,9 @@
         <label>Début <input name="start" placeholder="1:05:30"></label>
         <label>Fin <input name="end" placeholder="2:10:00"></label>
       </div>
+      <label class="stack">Intro
+        <select name="intro_id" id="retryIntroSelect"></select>
+      </label>
       <div class="dialog-foot">
         <button class="btn ghost" value="cancel" type="button" id="retryCancel">Annuler</button>
         <button class="btn" value="ok">Relancer</button>
