@@ -128,9 +128,12 @@ const alertBox = ({ title, message, kind = "info" }) =>
   modal({ title, icon: kind === "danger" ? "⚠️" : kind === "success" ? "✅" : "ℹ️", iconKind: kind,
     body: `<p>${message}</p>`, buttons: [{ label: "OK", primary: true }] });
 
-const promptBox = ({ title, label, value = "", placeholder = "", confirmLabel = "Enregistrer", submit }) =>
+const R2_HINT = "Sur R2, les fichiers sont déplacés pour suivre : les anciens liens de partage vers ces fichiers cesseront de fonctionner.";
+const r2Hint = () => (state.status?.r2 ? `<p class="hint">${R2_HINT}</p>` : "");
+
+const promptBox = ({ title, label, value = "", placeholder = "", confirmLabel = "Enregistrer", submit, hint = "" }) =>
   modal({
-    title, body: `<label>${esc(label)}<input name="v" value="${esc(value)}" placeholder="${esc(placeholder)}" autocomplete="off"></label>`,
+    title, body: `<label>${esc(label)}<input name="v" value="${esc(value)}" placeholder="${esc(placeholder)}" autocomplete="off"></label>${hint}`,
     buttons: [{ label: "Annuler", kind: "ghost", value: null }, { label: confirmLabel, primary: true }],
     submit: async (dlg) => {
       const v = dlg.querySelector("[name=v]").value.trim();
@@ -235,6 +238,10 @@ window.addEventListener("hashchange", () => { if (state.me) route(); });
 document.addEventListener("click", (e) => {
   const n = e.target.closest("[data-nav]");
   if (n) go(n.dataset.nav);
+});
+document.addEventListener("click", (e) => {
+  const l = e.target.closest("[data-go]");
+  if (l) { e.preventDefault(); go(l.dataset.go); }
 });
 $("menuBtn").onclick = () => $("sidebar").classList.toggle("open");
 
@@ -493,15 +500,47 @@ async function trimDialog(job) {
 }
 
 // ---------- Statut, parallélisme ----------
+function r2Pill(s) {
+  if (!s.r2) return '<span class="pill">R2 non configuré</span>';
+  const sy = s.r2_sync || {};
+  if (sy.running) return '<span class="pill busy link" data-r2>R2 · synchronisation…</span>';
+  const failed = sy.last?.failed?.length || 0;
+  if (failed) return `<span class="pill err link" data-r2>R2 · ${failed} erreur${failed > 1 ? "s" : ""}</span>`;
+  return '<span class="pill on link" data-r2>R2 connecté</span>';
+}
+
+async function r2Dialog() {
+  const sy = (await api("/api/r2/sync").catch(() => null)) || {};
+  const l = sy.last;
+  const rows = l ? `<dl class="kv"><dt>Dernière synchronisation</dt><dd>${fmtDate(l.at)}</dd>
+      <dt>Fichiers déplacés</dt><dd>${l.moved}</dd><dt>Fichiers envoyés</dt><dd>${l.uploaded}</dd><dt>Dossiers créés</dt><dd>${l.markers}</dd></dl>
+      ${l.failed.length ? `<div class="err-box">${l.failed.map((f) => `${esc(f.title)} : ${esc(f.error)}`).join("<br>")}</div>` : '<p class="hint">Tout est à jour.</p>'}`
+    : '<p class="hint">Aucune synchronisation depuis le démarrage.</p>';
+  const go = await modal({
+    title: "Synchronisation R2", icon: "☁️",
+    body: `<p>L'arborescence de R2 reproduit celle de la plateforme : <b>dossier / sous-dossier / Nom du podcast_date.mp3</b>. Renommer ou déplacer ici le fait aussi là-bas, automatiquement. Cette synchronisation rattrape ce qui aurait échoué et envoie les podcasts jamais envoyés.</p>${rows}`,
+    buttons: [{ label: "Fermer", kind: "ghost", value: null }, ...(can("folders.manage") ? [{ label: "Resynchroniser maintenant", primary: true }] : [])],
+    submit: async () => { await api("/api/r2/sync", { method: "POST" }); return true; },
+  });
+  if (go) { toast("Synchronisation R2 lancée", "ok"); loadStatus(); }
+}
+$("statusBar").addEventListener("click", (e) => { if (e.target.closest("[data-r2]")) r2Dialog(); });
+
 async function loadStatus() {
   const s = await api("/api/status").catch(() => null);
   if (!s) return null;
   $("statusBar").innerHTML = `
-    <span class="pill ${s.r2 ? "on" : ""}">R2 ${s.r2 ? "connecté" : "non configuré"}</span>
+    ${r2Pill(s)}
     <span class="pill ${s.llm ? "on" : ""}">Détection ${s.llm ? "IA (" + s.llm + ")" : "heuristique"}</span>
     <span class="pill link ${s.running ? "busy" : ""}" data-status="active">▶ ${s.running}/${s.max_parallel} en cours</span>
     <span class="pill link ${s.pending ? "waiting" : ""}" data-status="active">⏳ ${s.pending} en file</span>`;
+  const wasSyncing = state.status?.r2_sync?.running;
   state.status = s;
+  if (wasSyncing && !s.r2_sync?.running) {
+    const f = s.r2_sync?.last?.failed?.length;
+    toast(f ? `Synchronisation R2 terminée avec ${f} erreur(s)` : "R2 est à jour", f ? true : "ok");
+    refreshView();
+  }
   if (state.view === "home") renderHomeStats();
   const sel = $("parallelSelect");
   if (!sel.options.length) for (let n = 1; n <= s.max_parallel_limit; n++) sel.add(new Option(n, n));
@@ -699,9 +738,14 @@ async function createFolder(parentId) {
   if (state.view !== "folders") go("folders", f.id);
 }
 async function renameFolder(f) {
-  const r = await promptBox({ title: "Renommer le dossier", label: "Nouveau nom", value: f.name,
+  const r = await promptBox({ title: "Renommer le dossier", label: "Nouveau nom", value: f.name, hint: r2Hint(),
     submit: (name) => api(`/api/folders/${f.id}`, { method: "PATCH", body: { name } }) });
-  if (r) { await loadFolders(); toast("Dossier renommé", "ok"); }
+  if (r) { await loadFolders(); toast("Dossier renommé" + (state.status?.r2 ? " — R2 se met à jour" : ""), "ok"); }
+}
+async function renameJob(j) {
+  const r = await promptBox({ title: "Renommer le podcast", label: "Nouveau nom", value: j.title, hint: r2Hint(),
+    submit: (title) => api(`/api/jobs/${j.id}`, { method: "PATCH", body: { title } }) });
+  if (r) { await loadJobs(); toast("Podcast renommé" + (state.status?.r2 ? " — R2 se met à jour" : ""), "ok"); }
 }
 async function deleteFolder(f) {
   const ok = await confirmBox({ title: "Supprimer le dossier ?", danger: true, confirmLabel: "Supprimer",
@@ -719,16 +763,18 @@ async function folderIntroDialog(f) {
   const r = await modal({
     title: `Intro du dossier « ${f.name} »`,
     body: `<label>Intro utilisée pour les podcasts de ce dossier<select name="intro">${introOptions([["", "Hériter (parent, sinon intro par défaut)"]], false, f.intro_id ?? "")}</select></label>
-      <div data-note class="hint"></div><div data-preview></div>`,
+      <div data-note class="hint"></div><div data-preview></div>
+      <a class="page-link" data-go="intros" href="#intros">Gérer la bibliothèque d'intros →</a>`,
     buttons: [{ label: "Annuler", kind: "ghost", value: null }, { label: "Enregistrer", primary: true }],
     onMount: (dlg) => {
       const sel = dlg.querySelector("[name=intro]");
       const refresh = () => {
         const chosen = sel.value ? { id: +sel.value, name: introName(+sel.value) } : effectiveIntro(byId(f.parent_id));
-        dlg.querySelector("[data-note]").textContent = sel.value ? "" : chosen ? `Hérité : ${chosen.name}` : "Aucune intro à hériter : ajoutez un MP3 dans le menu Intros.";
+        dlg.querySelector("[data-note]").textContent = sel.value ? "" : chosen ? `Hérité : ${chosen.name}` : "Aucune intro à hériter : ajoutez un MP3 dans la bibliothèque d'intros.";
         dlg.querySelector("[data-preview]").innerHTML = chosen ? `<audio controls preload="none" src="/api/intros/${chosen.id}/audio" style="width:100%"></audio>` : "";
       };
       sel.onchange = refresh; refresh();
+      dlg.querySelector("[data-go]").onclick = (ev) => { ev.preventDefault(); dlg.querySelector("[data-close]").click(); go("intros"); };
     },
     submit: async (dlg) => {
       const v = dlg.querySelector("[name=intro]").value;
@@ -746,7 +792,7 @@ async function moveItem(kind, id, folderId) {
     else await api(`/api/jobs/${id}/move`, { method: "POST", body: { folder_id: folderId } });
     state.sel = null;
     await Promise.all([loadFolders(), loadJobs()]);
-    toast("Élément déplacé", "ok");
+    toast("Élément déplacé" + (state.status?.r2 ? " — R2 se met à jour" : ""), "ok");
   } catch (err) { toast(err.message, true); }
 }
 function folderChoices(excludeId) {
@@ -773,6 +819,7 @@ async function moveDialog(kind, item) {
       if (!r) throw new Error("Choisissez un dossier de destination");
       return r.value === "" ? "root" : +r.value;
     },
+    onMount: (dlg) => { if (state.status?.r2) dlg.querySelector(".move-list").insertAdjacentHTML("afterend", `<p class="hint">${R2_HINT}</p>`); },
   });
   if (dest === null || dest === undefined || dest === true) return;
   const target = dest === "root" ? null : dest;
@@ -854,7 +901,8 @@ function ctxEntries(kind, id) {
     if (j.on_r2) e.push({ label: "Copier le lien", icon: "link", run: act("link") });
     if (j.status === "done" && j.has_mp3 && can("jobs.trim")) e.push({ label: "Rogner…", icon: "scissors", run: act("trim") });
     if ((j.status === "done" || j.status === "error") && can("jobs.create")) e.push({ label: "Relancer…", icon: "retry", run: act("retry") });
-    if (manage) e.push({ label: "Déplacer vers…", icon: "move", run: () => moveDialog("job", j) });
+    if (manage) e.push({ label: "Renommer…", icon: "edit", run: () => renameJob(j) },
+      { label: "Déplacer vers…", icon: "move", run: () => moveDialog("job", j) });
     if (j.status !== "running" && can("jobs.delete")) e.push("-", { label: "Supprimer", icon: "trash", danger: true, run: act("delete") });
   } else {
     if (manage) e.push({ label: "Nouveau dossier", icon: "plus", run: () => createFolder(state.current) });

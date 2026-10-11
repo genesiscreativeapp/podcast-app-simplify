@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import func, or_
 
-from . import auth, config, storage
+from . import auth, config, r2sync, storage
 from .pipeline import audio
 from .db import (MAX_PARALLEL_LIMIT, Folder, Intro, Job, Setting, SessionLocal, User, folder_path,
                  get_max_parallel, init_db, queue_position)
@@ -24,6 +24,7 @@ MAX_INTRO_BYTES = 25 * 1024 * 1024
 app = FastAPI(title="Studio Podcast")
 init_db()
 auth.bootstrap_admin()
+r2sync.trigger()  # à chaque démarrage : R2 est remis en conformité avec la plateforme (idempotent)
 
 
 # --- Authentification par session (cookie) ------------------------------------------------
@@ -80,6 +81,7 @@ def job_dict(j: Job, with_log: bool = False, s=None) -> dict:
         "created_at": j.created_at.isoformat() if j.created_at else None,
         "finished_at": j.finished_at.isoformat() if j.finished_at else None,
         "edit_note": j.edit_note, "created_by": j.created_by,
+        "display_filename": r2sync.display_filename(j), "r2_key": j.r2_key_mp3,
     }
     if s is not None:
         folder = s.get(Folder, j.folder_id)
@@ -101,6 +103,15 @@ class FolderPatch(BaseModel):
     parent_id: int | None = None  # déplacement : pris en compte seulement s'il est envoyé (null = racine)
 
 
+def _check_sibling(s, parent_id, name, exclude_id=None):
+    """Deux dossiers frères ne peuvent pas avoir le même nom (ils auraient le même chemin sur R2)."""
+    want = r2sync.sanitize(name).lower()
+    q = s.query(Folder).filter(Folder.parent_id == parent_id if parent_id else Folder.parent_id.is_(None))
+    for f in q:
+        if f.id != exclude_id and r2sync.sanitize(f.name).lower() == want:
+            raise HTTPException(400, f"Un dossier « {f.name} » existe déjà à cet endroit")
+
+
 @app.get("/api/folders", dependencies=[Depends(auth.need("jobs.view"))])
 def list_folders(s=Depends(db)):
     counts = dict(s.query(Job.folder_id, func.count(Job.id)).group_by(Job.folder_id).all())
@@ -114,9 +125,11 @@ def create_folder(body: FolderIn, s=Depends(db)):
         raise HTTPException(400, "Nom de dossier vide")
     if body.parent_id and not s.get(Folder, body.parent_id):
         raise HTTPException(404, "Dossier parent introuvable")
+    _check_sibling(s, body.parent_id, name)
     f = Folder(name=name, parent_id=body.parent_id)
     s.add(f)
     s.commit()
+    r2sync.trigger()
     return folder_dict(f)
 
 
@@ -124,9 +137,11 @@ def create_folder(body: FolderIn, s=Depends(db)):
 def update_folder(folder_id: int, body: FolderPatch, s=Depends(db)):
     """Renomme et/ou déplace un dossier."""
     f = s.get(Folder, folder_id) or _404("Dossier")
+    if body.name is not None and not body.name.strip():
+        raise HTTPException(400, "Nom de dossier vide")
+    _check_sibling(s, body.parent_id if "parent_id" in body.model_fields_set else f.parent_id,
+                   body.name.strip() if body.name is not None else f.name, exclude_id=f.id)
     if body.name is not None:
-        if not body.name.strip():
-            raise HTTPException(400, "Nom de dossier vide")
         f.name = body.name.strip()
     if "parent_id" in body.model_fields_set:
         if body.parent_id:
@@ -140,6 +155,7 @@ def update_folder(folder_id: int, body: FolderPatch, s=Depends(db)):
                 cur = s.get(Folder, cur.parent_id) if cur.parent_id else None
         f.parent_id = body.parent_id or None
     s.commit()
+    r2sync.trigger()  # les podcasts du dossier changent de chemin sur R2
     return folder_dict(f)
 
 
@@ -151,6 +167,7 @@ def delete_folder(folder_id: int, s=Depends(db)):
         raise HTTPException(400, "Le dossier n'est pas vide (sous-dossiers ou traitements)")
     s.delete(f)
     s.commit()
+    r2sync.trigger()  # retire l'objet « dossier » devenu inutile sur R2
     return {"ok": True}
 
 
@@ -358,6 +375,24 @@ def move_job(job_id: int, body: MoveIn, s=Depends(db)):
         raise HTTPException(404, "Dossier de destination introuvable")
     job.folder_id = body.folder_id
     s.commit()
+    r2sync.trigger()
+    return job_dict(job, s=s)
+
+
+class JobRename(BaseModel):
+    title: str
+
+
+@app.patch("/api/jobs/{job_id}", dependencies=[Depends(auth.need("folders.manage"))])
+def rename_job(job_id: int, body: JobRename, s=Depends(db)):
+    """Renomme un podcast : le fichier est aussi renommé sur R2."""
+    job = s.get(Job, job_id) or _404("Traitement")
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(400, "Le nom est obligatoire")
+    job.title = title
+    s.commit()
+    r2sync.trigger()
     return job_dict(job, s=s)
 
 
@@ -400,7 +435,7 @@ def job_file(job_id: int, fmt: str, download: bool = False, s=Depends(db)):
     if not path or not Path(path).exists():
         raise HTTPException(404, "Fichier indisponible")
     return FileResponse(path, media_type="audio/mpeg",
-                        filename=Path(path).name if download else None)
+                        filename=r2sync.display_filename(job) if download else None)
 
 
 class TrimIn(BaseModel):
@@ -409,29 +444,19 @@ class TrimIn(BaseModel):
 
 
 def _publish_new_audio(s, job: Job, new_file: Path) -> None:
-    """Remplace le MP3 d'un traitement terminé (disque, base et R2). R2 d'abord : en cas d'échec, rien ne change.
-    Le fichier R2 change de nom : une copie en cache (CDN, navigateur) de l'ancien ne peut pas être resservie."""
+    """Remplace le MP3 d'un traitement terminé (disque, base et R2, au même chemin).
+    R2 d'abord : en cas d'échec d'envoi, rien ne change."""
     cur = Path(job.local_mp3)
-    old_key, new_key = job.r2_key_mp3, None
-    if old_key and storage.enabled():
-        folder = s.get(Folder, job.folder_id)
-        new_key = storage.build_key(folder_path(s, folder) if folder else [], f"{job.filename}-{secrets.token_hex(2)}.mp3")
+    if job.r2_key_mp3 and storage.enabled():
         try:
-            storage.upload(new_file, new_key, "audio/mpeg")
+            storage.upload(new_file, job.r2_key_mp3, "audio/mpeg")
         except Exception as exc:
             new_file.unlink(missing_ok=True)
             raise HTTPException(502, f"Envoi vers R2 impossible : {exc}")
     new_file.replace(cur)
     job.size_mp3 = cur.stat().st_size
     job.duration_output = audio.probe_duration(cur)
-    if new_key:
-        job.r2_key_mp3 = new_key
     s.commit()
-    if new_key and old_key:
-        try:
-            storage.delete([old_key])
-        except Exception:
-            pass  # l'ancien fichier reste orphelin sur R2 : sans gravité
 
 
 def _done_job(s, job_id: int) -> Job:
@@ -496,8 +521,23 @@ def status(s=Depends(db)):
         "r2": storage.enabled(),
         "llm": config.LLM_PROVIDER if config.LLM_PROVIDER in ("anthropic", "openai") else None,
         "running": count("running"), "pending": count("pending"),
+        "r2_sync": r2sync.status(),
         "max_parallel": get_max_parallel(s), "max_parallel_limit": MAX_PARALLEL_LIMIT,
     }
+
+
+@app.get("/api/r2/sync", dependencies=[Depends(auth.need("jobs.view"))])
+def r2_sync_status():
+    return r2sync.status()
+
+
+@app.post("/api/r2/sync", dependencies=[Depends(auth.need("folders.manage"))])
+def r2_sync_run():
+    """Remet R2 en conformité avec la plateforme (déplace, envoie les fichiers manquants, crée les dossiers)."""
+    if not storage.enabled():
+        raise HTTPException(400, "R2 n'est pas configuré")
+    r2sync.trigger()
+    return r2sync.status()
 
 
 class SettingsIn(BaseModel):

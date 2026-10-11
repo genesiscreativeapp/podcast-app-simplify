@@ -51,7 +51,7 @@
           <button class="nav-link" data-nav="home"><span data-ic="home"></span> Accueil</button>
           <button class="nav-link" data-nav="folders"><span data-ic="folder"></span> Dossiers</button>
           <button class="nav-link" data-nav="history"><span data-ic="history"></span> Historique</button>
-          <button class="nav-link" data-nav="intros"><span data-ic="music"></span> Intros</button>
+          <button class="nav-link" data-nav="intros"><span data-ic="music"></span> Bibliothèque d'intros</button>
           <button class="nav-link" data-nav="users" id="navUsers" hidden><span data-ic="users"></span> Utilisateurs</button>
         </nav>
       </aside>
@@ -103,8 +103,8 @@
 
           <!-- Intros -->
           <section id="introsView" hidden>
-            <div class="page-head"><h1>Intros</h1></div>
-            <p class="hint">Bibliothèque d'intros (fichiers MP3). Chaque traitement peut en utiliser une ; sans choix, on prend l'intro du dossier, sinon l'intro par défaut (★).</p>
+            <div class="page-head"><h1>Bibliothèque d'intros</h1></div>
+            <p class="hint">Gérez ici vos intros (fichiers MP3). Chaque traitement peut en utiliser une ; sans choix, on prend l'intro du dossier, sinon l'intro par défaut (★).</p>
             <div id="introList" class="jobs"></div>
             <form id="introForm" class="card intro-add">
               <h3>Ajouter une intro</h3>
@@ -158,6 +158,7 @@
                 </label>
                 <label class="full">Intro
                   <select name="intro_id" id="jobIntroSelect"></select>
+                  <a class="page-link" data-go="intros" href="#intros">Gérer la bibliothèque d'intros →</a>
                 </label>
                 <details class="full">
                   <summary>Options : forcer le début et la fin de la prédication</summary>

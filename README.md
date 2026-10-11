@@ -31,9 +31,26 @@ Au premier traitement, les modèles Whisper sont téléchargés dans `data/model
 4. Suivre l'avancement en direct, écouter le résultat, télécharger le MP3 ou copier le lien R2.
 5. Si la prédication détectée n'est pas la bonne : **Relancer** en saisissant le début et la fin (format `1:05:30`).
 
+## Structure sur R2 = structure de la plateforme
+
+Les fichiers sont rangés sur R2 comme dans l'interface, avec les mêmes noms :
+
+```
+podcasts/                          ← R2_PREFIX (vide = racine du bucket)
+  CULTE ROYAL/
+    Octobre 2026/
+      La foi qui déplace les montagnes_2026-10-11.mp3
+```
+
+- Renommer ou déplacer un **dossier** ou un **podcast** (menu clic droit, glisser-déposer) déplace aussi les fichiers sur R2, en arrière-plan. Les dossiers vides existent aussi sur R2 (objet vide `chemin/`). Un nom de dossier ne peut pas être utilisé deux fois au même endroit.
+- Seuls les caractères interdits ou ambigus (`/ \ : * ? " < > |`) sont remplacés par une espace ; accents et espaces sont conservés.
+- **Les anciens liens de partage cessent de fonctionner** quand un fichier change de chemin : à utiliser en connaissance de cause (l'interface le rappelle dans les fenêtres de renommage et de déplacement).
+- La pastille **R2** en haut ouvre l'état de la synchronisation. **Resynchroniser** rattrape ce qui aurait échoué, déplace les fichiers déposés à l'ancien format de chemin (versions précédentes) et envoie les podcasts jamais envoyés. Elle est aussi lancée à chaque démarrage.
+- Le cache des fichiers est court (5 minutes) puisqu'un fichier peut changer de contenu (rognage) ou de chemin. `R2_ENDPOINT_URL` permet d'utiliser un autre stockage compatible S3.
+
 ## Rogner un podcast terminé
 
-Bouton **Rogner** sur un podcast terminé : on écoute, on place le curseur et « Marquer ici » fixe le début ou la fin conservés (ou on saisit `h:mm:ss`). Le rognage **ne réencode pas** (aucune perte de qualité, précision d'environ 26 ms). L'original est gardé : **Restaurer l'original** revient en arrière. Sur R2, le fichier est remplacé par un nouveau (le lien de partage change, pour qu'aucune copie en cache de l'ancien ne soit servie). Permission `jobs.trim`.
+Bouton **Rogner** sur un podcast terminé : on écoute, on place le curseur et « Marquer ici » fixe le début ou la fin conservés (ou on saisit `h:mm:ss`). Le rognage **ne réencode pas** (aucune perte de qualité, précision d'environ 26 ms). L'original est gardé : **Restaurer l'original** revient en arrière. Sur R2, le fichier est remplacé au même chemin. Permission `jobs.trim`.
 
 ## Connexion, utilisateurs et permissions
 

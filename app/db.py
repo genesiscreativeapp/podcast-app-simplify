@@ -57,6 +57,12 @@ class UserSession(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime)
 
 
+class R2Marker(Base):
+    """Objets « dossier » (clé terminée par /) que nous avons créés sur R2, pour pouvoir les déplacer ou les retirer."""
+    __tablename__ = "r2_markers"
+    key: Mapped[str] = mapped_column(String(900), primary_key=True)
+
+
 class Setting(Base):
     """Réglages modifiables depuis l'interface (clé / valeur)."""
     __tablename__ = "settings"

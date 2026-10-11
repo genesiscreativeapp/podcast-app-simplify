@@ -5,8 +5,8 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from .. import config, storage
-from ..db import Folder, Job, SessionLocal, folder_path, resolve_intro
+from .. import config, r2sync, storage
+from ..db import Folder, Job, SessionLocal, resolve_intro
 from ..utils import fmt_time
 from . import audio, steps
 from .detect import detect_sermon
@@ -64,7 +64,6 @@ def run_job(job_id: int) -> None:
     with SessionLocal() as s:
         job = s.get(Job, job_id)
         folder = s.get(Folder, job.folder_id)
-        names = folder_path(s, folder) if folder else []
         intro = resolve_intro(s, folder, job.intro_id)
         url, title, date, filename = job.youtube_url, job.title, job.date, job.filename
         known_title = job.video_title
@@ -184,7 +183,8 @@ def run_job(job_id: int) -> None:
         # 5. Envoi vers R2
         if storage.enabled():
             rep.step("upload")
-            key = storage.build_key(names, mp3.name)
+            with SessionLocal() as s2:
+                key = r2sync.desired_key(s2, s2.get(Job, job_id))
             size, sent, upload_cb = max(mp3.stat().st_size, 1), [0], rep.sub("upload")
 
             def on_bytes(n):  # appelé depuis les threads de boto3
