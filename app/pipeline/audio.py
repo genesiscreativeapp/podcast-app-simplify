@@ -4,7 +4,9 @@ import tempfile
 from pathlib import Path
 from typing import Callable
 
-SR = 24000  # fréquence de travail : le MP3 final (22 kHz) ne dépasse pas 11 kHz de bande, inutile de traiter plus (2x moins de calcul et de mémoire)
+from .. import config
+
+SR = 24000  # fréquence de travail : le MP3 final est lui aussi en 24 kHz (12 kHz de bande, largement assez pour la voix), inutile de traiter plus (2x moins de calcul et de mémoire)
 SR_WHISPER = 16000
 
 
@@ -45,26 +47,24 @@ def to_whisper(src: Path, out: Path, duration: float | None = None,
          "-c:a", "pcm_s16le", str(out)], duration, on_progress)
 
 
-# Chaîne d'amélioration de la voix (100 % CPU, rapide) :
-#  - passage en mono 24 kHz d'abord, pour que tout le reste coûte 2 à 4x moins cher
-#  - coupe les basses (ronflements, vibrations de micro) et les très hautes fréquences
-#  - réduction de bruit FFT avec suivi du bruit de fond
-#  - léger compresseur pour homogénéiser les passages criés / chuchotés
-ENHANCE_FILTER = ",".join([
-    f"aresample={SR}",
-    "aformat=channel_layouts=mono",
-    "highpass=f=70",
-    "lowpass=f=10000",
-    "afftdn=nr=12:nf=-40:tn=1",
-    "acompressor=threshold=0.1:ratio=3:attack=10:release=250:makeup=1.5",
-])
+# Chaîne d'amélioration de la voix, volontairement légère : un traitement trop fort rend la voix métallique.
+#  - mono 24 kHz d'abord : tout le reste coûte 2 à 4x moins cher
+#  - coupe les basses (ronflements, vibrations de micro)
+#  - réduction de bruit FFT douce (DENOISE_DB, 0 = aucune)
+#  - compresseur très léger pour homogénéiser les passages criés / chuchotés
+def enhance_filter() -> str:
+    parts = [f"aresample={SR}", "aformat=channel_layouts=mono", "highpass=f=70"]
+    if config.DENOISE_DB > 0:
+        parts.append(f"afftdn=nr={config.DENOISE_DB:g}:nf=-50:tn=1")
+    parts.append("acompressor=threshold=0.125:ratio=2:attack=20:release=300:makeup=1.2")
+    return ",".join(parts)
 
 
 def extract_enhanced(src: Path, start: float, end: float, out: Path, out_whisper: Path,
                      on_progress: Callable[[float], None] | None = None) -> None:
     """Découpe la prédication et l'améliore en un seul passage ffmpeg.
     Produit le WAV de travail (24 kHz) et sa copie 16 kHz pour Whisper."""
-    graph = f"[0:a]{ENHANCE_FILTER},asplit=2[a][b];[b]aresample={SR_WHISPER}[c]"
+    graph = f"[0:a]{enhance_filter()},asplit=2[a][b];[b]aresample={SR_WHISPER}[c]"
     run(["ffmpeg", "-y", "-hide_banner", "-ss", f"{start:.3f}", "-i", str(src),
          "-t", f"{max(end - start, 1):.3f}", "-vn", "-filter_complex", graph,
          "-map", "[a]", "-c:a", "pcm_s16le", str(out),
@@ -100,5 +100,5 @@ def encode_mp3(src: Path, out: Path, bitrate: str, title: str, artist: str, date
                duration: float | None = None, on_progress: Callable[[float], None] | None = None) -> None:
     """MP3 mono : lisible partout (WhatsApp, Telegram, lecteurs de voiture…)."""
     run(["ffmpeg", "-y", "-hide_banner", "-i", str(src), "-c:a", "libmp3lame",
-         "-b:a", bitrate, "-ac", "1", "-ar", "22050", "-id3v2_version", "3",
+         "-b:a", bitrate, "-ac", "1", "-ar", str(SR), "-id3v2_version", "3",
          *_meta(title, artist, date), str(out)], duration, on_progress)

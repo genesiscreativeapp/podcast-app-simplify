@@ -30,6 +30,32 @@ class Base(DeclarativeBase):
     pass
 
 
+class User(Base):
+    __tablename__ = "users"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    username: Mapped[str] = mapped_column(String(60), unique=True)
+    display_name: Mapped[str] = mapped_column(String(120), default="")
+    password_hash: Mapped[str] = mapped_column(String(300))
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    permissions: Mapped[str] = mapped_column(Text, default="")  # clés séparées par des virgules
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_login: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    @property
+    def perms(self) -> set[str]:
+        return {p for p in (self.permissions or "").split(",") if p}
+
+
+class UserSession(Base):
+    """Session de connexion : seul le hash du jeton est stocké."""
+    __tablename__ = "sessions"
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+
+
 class Setting(Base):
     """Réglages modifiables depuis l'interface (clé / valeur)."""
     __tablename__ = "settings"
@@ -68,6 +94,9 @@ class Job(Base):
 
     # Intro choisie : NULL = automatique (dossier, sinon défaut) ; 0 = aucune ; sinon id dans la bibliothèque
     intro_id: Mapped[int | None] = mapped_column(nullable=True)
+
+    edit_note: Mapped[str | None] = mapped_column(Text, nullable=True)   # bilan du montage et du nettoyage
+    created_by: Mapped[str | None] = mapped_column(String(60), nullable=True)
 
     # Bornes forcées par l'utilisateur (secondes) — sinon détection auto
     start_override: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -111,13 +140,14 @@ def _init_db() -> None:
     Base.metadata.create_all(engine)
     # Bases créées avant la bibliothèque d'intros : ajoute les colonnes manquantes
     with engine.begin() as conn:
-        for table, col in (("jobs", "intro_id"), ("folders", "intro_id")):
+        for table, col, sql_type in (("jobs", "intro_id", "INTEGER"), ("folders", "intro_id", "INTEGER"),
+                                     ("jobs", "edit_note", "TEXT"), ("jobs", "created_by", "VARCHAR(60)")):
             cols = {r[1] for r in conn.execute(text(f"PRAGMA table_info({table})"))}
             if col not in cols:
-                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} INTEGER"))
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {sql_type}"))
 
 
-MAX_PARALLEL_LIMIT = 8
+MAX_PARALLEL_LIMIT = 20
 
 
 def get_max_parallel(session) -> int:

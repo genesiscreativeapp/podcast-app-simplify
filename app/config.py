@@ -26,8 +26,11 @@ KEEP_WORK_FILES = _bool("KEEP_WORK_FILES", False)
 KEEP_SOURCES = int(_env("KEEP_SOURCES", "5"))  # nombre d'audios YouTube gardés en cache (0 = aucun)
 
 # --- Accès à l'interface (HTTP Basic) -------------------------------------
+# Compte administrateur créé au tout premier démarrage (ensuite, les comptes se gèrent dans l'interface).
+# Si APP_PASSWORD est vide, un mot de passe aléatoire est généré et écrit une fois dans les logs de `web`.
 APP_USER = _env("APP_USER", "admin")
-APP_PASSWORD = _env("APP_PASSWORD")  # si vide : pas d'authentification
+APP_PASSWORD = _env("APP_PASSWORD")
+SESSION_DAYS = int(_env("SESSION_DAYS", "14"))
 
 # --- Téléchargement YouTube -----------------------------------------------
 YTDLP_COOKIES = _env("YTDLP_COOKIES")  # chemin vers cookies.txt (si YouTube bloque l'IP)
@@ -61,14 +64,28 @@ LLM_API_KEY = _env("LLM_API_KEY", "")
 LLM_MODEL = _env("LLM_MODEL", "")
 LLM_BASE_URL = _env("LLM_BASE_URL", "https://api.openai.com/v1")
 
+# --- Qualité de la voix ----------------------------------------------------------
+# Réduction de bruit (dB) : une réduction forte donne une voix « métallique ». 0 = désactivée.
+DENOISE_DB = float(_env("DENOISE_DB", "6"))
+
 # --- Montage ---------------------------------------------------------------
 MAX_PAUSE = float(_env("MAX_PAUSE", "0.8"))        # silence au-delà duquel on raccourcit (s)
 TARGET_PAUSE = float(_env("TARGET_PAUSE", "0.45")) # durée du silence conservé (s)
 REMOVE_REPEATS = _bool("REMOVE_REPEATS", True)
+REPEAT_MAX_GAP = float(_env("REPEAT_MAX_GAP", "1.0"))    # pause max (s) entre deux répétitions pour les retirer
+REPEAT_MAX_WORDS = int(_env("REPEAT_MAX_WORDS", "8"))    # longueur max (en mots) d'une phrase répétée retirée
+# Amorce Whisper : l'encourage à transcrire les « euh » et répétitions au lieu de les gommer
+WHISPER_PROMPT = _env("WHISPER_PROMPT", "Euh... alors, euh, mes frères, mes frères et sœurs, hum, voilà, euh, la foi, la foi.")
+# Retire témoignages, annonces, chants et autres voix de la prédication (nécessite LLM_PROVIDER)
+REMOVE_OFFTOPIC = _bool("REMOVE_OFFTOPIC", True)
+# Marge ajoutée autour de la prédication repérée automatiquement (secondes) : l'IA retire ensuite précisément
+# l'adoration qui précède et les annonces qui suivent. Sans marge, un début repéré un peu tard couperait le message.
+OFFTOPIC_PAD_BEFORE = float(_env("OFFTOPIC_PAD_BEFORE", "90"))
+OFFTOPIC_PAD_AFTER = float(_env("OFFTOPIC_PAD_AFTER", "60"))
 REMOVE_FILLERS = _bool("REMOVE_FILLERS", True)
 
 # --- Compression -------------------------------------------------------------
-MP3_BITRATE = _env("MP3_BITRATE", "40k")
+MP3_BITRATE = _env("MP3_BITRATE", "64k")
 PODCAST_ARTIST = _env("PODCAST_ARTIST", "")
 
 # --- Cloudflare R2 ------------------------------------------------------------

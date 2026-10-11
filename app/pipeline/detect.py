@@ -20,8 +20,9 @@ PROMPT = """Voici la transcription automatique et horodatée d'un culte chrétie
 Chaque ligne couvre environ {chunk} secondes ; le texte est approximatif et tronqué.
 
 Ta tâche : trouver le début et la fin de la PRÉDICATION principale (le message prêché par l'orateur principal).
-- Inclus : l'introduction du prédicateur, la lecture biblique liée au message, le message et sa conclusion (y compris sa prière de fin de message).
-- Exclus : louange et chants, annonces, offrandes/dîmes, témoignages, interventions des autres personnes, et tout ce qui suit la fin du message.
+- Le début est le moment où le prédicateur COMMENCE RÉELLEMENT À ENSEIGNER : introduction du sujet, lecture du texte biblique du message. Ce qui précède n'en fait pas partie : moments d'adoration, louange, chants, prières d'adoration ou d'intercession (même parlées, même dirigées par le prédicateur), annonces, offrandes, témoignages. Une longue suite de « Alléluia », « Gloire à Dieu », « Merci Jésus » est de l'adoration, pas le message.
+- Si tu hésites sur le début, choisis un moment un peu PLUS TÔT : un traitement ultérieur retirera précisément ce qui n'est pas le message.
+- La fin est la conclusion du message, y compris sa prière de fin. Exclus tout ce qui suit : appel, annonces, offrandes, chants, interventions d'autres personnes.
 
 Réponds UNIQUEMENT avec un objet JSON, sans autre texte :
 {{"start": "HH:MM:SS", "end": "HH:MM:SS", "raison": "explication courte"}}
@@ -42,14 +43,14 @@ def build_transcript(segments: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _ask_llm(prompt: str) -> str:
+def ask_llm(prompt: str, max_tokens: int = 400) -> str:
     timeout = httpx.Timeout(180.0)
     if config.LLM_PROVIDER == "anthropic":
         r = httpx.post(
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": config.LLM_API_KEY, "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
-            json={"model": config.LLM_MODEL or "claude-haiku-5-5", "max_tokens": 400,
+            json={"model": config.LLM_MODEL or "claude-haiku-4-5-20251001", "max_tokens": max_tokens,
                   "messages": [{"role": "user", "content": prompt}]},
             timeout=timeout,
         )
@@ -73,13 +74,17 @@ def _ask_llm(prompt: str) -> str:
 def detect_with_llm(segments: list[dict], title: str | None) -> tuple[float, float, str]:
     prompt = PROMPT.format(title=f" (titre : « {title} »)" if title else "",
                            chunk=CHUNK, transcript=build_transcript(segments))
-    answer = _ask_llm(prompt)
+    answer = ask_llm(prompt)
     match = re.search(r"\{.*\}", answer, re.S)
     if not match:
         raise ValueError(f"Réponse LLM illisible : {answer[:200]}")
     data = json.loads(match.group(0))
     start, end = parse_time(data["start"]), parse_time(data["end"])
     return start, end, f"IA : {data.get('raison', '')}".strip()
+
+
+# Mots criés pendant l'adoration : ils ne comptent pas comme de la « parole dense » d'une prédication
+ADORATION_WORDS = {"alleluia", "alléluia", "amen", "hosanna", "gloire", "merci", "jesus", "jésus", "oui", "hallelujah"}
 
 
 def detect_heuristic(segments: list[dict], duration: float, coverage: float = 1.0,
@@ -92,7 +97,7 @@ def detect_heuristic(segments: list[dict], duration: float, coverage: float = 1.
         if s.get("no_speech_prob", 0) > 0.6 or not re.search(r"[a-zA-ZÀ-ÿ]", s["text"]):
             continue
         idx = min(int(((s["start"] + s["end"]) / 2) // window), n - 1)
-        counts[idx] += len(s["text"].split())
+        counts[idx] += sum(1 for w in s["text"].split() if re.sub(r"[^\wÀ-ÿ]", "", w.lower()) not in ADORATION_WORDS)
     spoken = [c / (window * coverage) >= min_wps for c in counts]
 
     best, cur_start, gap, last_spoken = (0, 0, 0), None, 0, None

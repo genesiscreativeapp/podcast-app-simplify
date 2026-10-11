@@ -9,120 +9,186 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <header class="topbar">
-    <button class="icon-btn menu-btn" id="menuBtn" aria-label="Dossiers">☰</button>
-    <div class="brand"><span class="logo">◉</span> Studio Podcast</div>
-    <div class="status" id="statusBar"></div>
-    <label class="parallel" title="Nombre de traitements menés en même temps ; les autres attendent en file">Parallèle
-      <select id="parallelSelect"></select></label>
-  </header>
+  <div id="boot" class="boot"><span class="spinner big"></span></div>
 
-  <div class="layout">
-    <aside class="sidebar" id="sidebar">
-      <button class="side-link" id="historyBtn">🕘 Historique des traitements</button>
-      <div class="side-head">
-        <span>Dossiers</span>
-        <button class="btn small" id="newRootBtn">+ Dossier</button>
-      </div>
-      <nav id="tree" class="tree"></nav>
-      <div class="side-foot">
-        <div class="label">Intro par défaut</div>
-        <div id="defaultIntro" class="muted">—</div>
-        <button class="btn small ghost" id="introsBtn">🎵 Gérer les intros</button>
-      </div>
-    </aside>
+  <!-- ===== Connexion ===== -->
+  <main id="loginScreen" class="login-screen" hidden>
+    <form id="loginForm" class="login-card" autocomplete="on">
+      <div class="login-logo"><span data-ic="mic"></span></div>
+      <h1>Studio Podcast</h1>
+      <p class="muted">Connectez-vous pour continuer</p>
+      <label>Identifiant
+        <input name="username" autocomplete="username" required autofocus>
+      </label>
+      <label>Mot de passe
+        <input name="password" type="password" autocomplete="current-password" required>
+      </label>
+      <div class="form-error" id="loginError" hidden></div>
+      <button class="btn block" type="submit">Se connecter</button>
+    </form>
+  </main>
 
-    <main class="main" id="main">
-      <div class="empty" id="emptyState">
-        <h2>Bienvenue 👋</h2>
-        <p>Créez un dossier (par exemple <b>CULTE ROYAL</b>) puis collez-y un lien YouTube.<br>
-        Le traitement est entièrement automatique : téléchargement, extraction de la prédication,
-        nettoyage de la voix, intro, compression et envoi sur R2.</p>
-        <button class="btn" id="emptyNewBtn">+ Créer un dossier</button>
-      </div>
-
-      <section id="historyView" hidden>
-        <div class="folder-head"><h1>Historique des traitements</h1></div>
-        <div class="card filters">
-          <input id="histSearch" type="search" placeholder="Rechercher (nom, titre de la vidéo, lien…)">
-          <select id="histStatus">
-            <option value="">Tous les statuts</option>
-            <option value="active">En cours / en attente</option>
-            <option value="done">Terminés</option>
-            <option value="error">En erreur</option>
-          </select>
+  <!-- ===== Application ===== -->
+  <div id="app" hidden>
+    <header class="topbar">
+      <button class="icon-btn menu-btn" id="menuBtn" aria-label="Menu">☰</button>
+      <div class="brand"><span class="logo" data-ic="mic"></span> Studio Podcast</div>
+      <div class="status" id="statusBar"></div>
+      <label class="parallel" id="parallelBox" title="Nombre de traitements menés en même temps ; les autres attendent en file" hidden>Parallèle
+        <select id="parallelSelect"></select></label>
+      <div class="user-menu">
+        <button class="user-btn" id="userBtn"><span class="avatar" id="userAvatar"></span><span id="userName"></span></button>
+        <div class="menu" id="userMenu" hidden>
+          <button data-user="password"><span data-ic="key"></span> Changer mon mot de passe</button>
+          <button data-user="logout"><span data-ic="logout"></span> Se déconnecter</button>
         </div>
-        <div id="histCount" class="hint"></div>
-        <div id="histList" class="jobs"></div>
-        <button class="btn ghost" id="histMore" hidden>Afficher plus</button>
-      </section>
+      </div>
+    </header>
 
-      <section id="folderView" hidden>
-        <div class="crumbs" id="crumbs"></div>
-        <div class="folder-head">
-          <h1 id="folderTitle"></h1>
-          <div class="actions">
-            <button class="btn ghost small" id="subfolderBtn">+ Sous-dossier</button>
-            <button class="btn ghost small" id="renameBtn">Renommer</button>
-            <button class="btn ghost small danger" id="deleteFolderBtn">Supprimer</button>
-          </div>
+    <div class="layout">
+      <aside class="sidebar" id="sidebar">
+        <nav class="nav">
+          <button class="nav-link" data-nav="home"><span data-ic="home"></span> Accueil</button>
+          <button class="nav-link" data-nav="history"><span data-ic="history"></span> Historique</button>
+          <button class="nav-link" data-nav="users" id="navUsers" hidden><span data-ic="users"></span> Utilisateurs</button>
+        </nav>
+        <div class="side-head">
+          <span>Dossiers</span>
+          <button class="btn small" id="newRootBtn" hidden><span data-ic="plus"></span> Dossier</button>
         </div>
+        <nav id="tree" class="tree"></nav>
+        <div class="side-foot">
+          <div class="label">Intro par défaut</div>
+          <div id="defaultIntro" class="muted">—</div>
+          <button class="btn small ghost" id="introsBtn"><span data-ic="music"></span> Bibliothèque d'intros</button>
+        </div>
+      </aside>
 
-        <div class="subfolders" id="subfolders"></div>
-
-        <div class="card">
-          <h3>Nouveau traitement</h3>
-          <form id="jobForm" class="job-form">
-            <label class="full">Lien YouTube
-              <input name="youtube_url" type="url" required placeholder="https://www.youtube.com/watch?v=…">
-            </label>
-            <label>Nom
-              <input name="title" required placeholder="La foi qui déplace les montagnes">
-            </label>
-            <label>Date
-              <input name="date" type="date" required>
-            </label>
-            <label class="full">Intro
-              <select name="intro_id" id="jobIntroSelect"></select>
-            </label>
-            <details class="full">
-              <summary>Options : forcer le début et la fin de la prédication</summary>
-              <div class="row">
-                <label>Début <input name="start" placeholder="1:05:30"></label>
-                <label>Fin <input name="end" placeholder="2:10:00"></label>
+      <main class="main" id="main">
+        <div class="wrap">
+          <!-- Accueil -->
+          <section id="homeView" hidden>
+            <div class="empty" id="emptyState" hidden>
+              <div class="empty-icon"><span data-ic="mic"></span></div>
+              <h2>Bienvenue 👋</h2>
+              <p>Créez un dossier (par exemple <b>CULTE ROYAL</b>) puis collez-y un lien YouTube.<br>
+              Le traitement est entièrement automatique : téléchargement, extraction de la prédication,
+              nettoyage de la voix, intro, compression et envoi sur R2.</p>
+              <button class="btn" id="emptyNewBtn" hidden><span data-ic="plus"></span> Créer un dossier</button>
+            </div>
+            <div id="homeContent">
+              <div class="page-head"><h1>Accueil</h1></div>
+              <div class="stats-grid" id="homeStats"></div>
+              <div id="homeActiveBox" hidden>
+                <h3 class="section-title">En cours et en file d'attente <span class="count" id="homeActiveCount"></span></h3>
+                <div id="homeActive" class="jobs"></div>
               </div>
-              <p class="hint">Laisser vide pour une détection automatique. Renseigner ces champs évite l'étape de repérage (plus rapide).</p>
-            </details>
-            <details class="full">
-              <summary>Ajouter plusieurs liens d'un coup</summary>
-              <textarea id="batchText" rows="5" placeholder="https://youtube.com/watch?v=… | La foi qui déplace les montagnes | 2026-10-11&#10;https://youtube.com/watch?v=… | Le pouvoir de la prière"></textarea>
-              <p class="hint">Une ligne par traitement : <b>lien | nom | date</b> (date facultative : celle du formulaire est utilisée). Ils sont traités dans l'ordre, selon le nombre de traitements en parallèle. Les lignes en erreur restent dans la zone.</p>
-              <button class="btn small" type="button" id="batchBtn">Ajouter tout à la file</button>
-            </details>
-            <div class="full form-foot">
-              <span class="hint" id="filenamePreview"></span>
-              <button class="btn" type="submit">Lancer le traitement</button>
+              <div class="section-head">
+                <h3 class="section-title">Podcasts <span class="count" id="homeDoneCount"></span></h3>
+                <input id="homeSearch" type="search" placeholder="Rechercher un podcast…" class="search">
+              </div>
+              <div id="homeDone" class="jobs"></div>
+              <div class="more-row"><button class="btn ghost" data-nav="history">Voir tout l'historique →</button></div>
             </div>
-          </form>
-        </div>
+          </section>
 
-        <div class="card">
-          <div class="intro-row">
-            <div>
-              <h3>Intro de ce dossier</h3>
-              <div class="muted" id="folderIntroNote"></div>
+          <!-- Historique -->
+          <section id="historyView" hidden>
+            <div class="page-head"><h1>Historique des traitements</h1></div>
+            <div class="card filters">
+              <input id="histSearch" type="search" placeholder="Rechercher (nom, titre de la vidéo, lien…)">
+              <select id="histStatus">
+                <option value="">Tous les statuts</option>
+                <option value="active">En cours / en attente</option>
+                <option value="done">Terminés</option>
+                <option value="error">En erreur</option>
+              </select>
             </div>
-            <select id="folderIntroSelect"></select>
-          </div>
-          <div id="folderIntroPlayer"></div>
-        </div>
+            <div id="histCount" class="hint"></div>
+            <div id="histList" class="jobs"></div>
+            <button class="btn ghost more" id="histMore" hidden>Afficher plus</button>
+          </section>
 
-        <h3 class="section-title">Traitements</h3>
-        <div id="jobs" class="jobs"></div>
-      </section>
-    </main>
+          <!-- Utilisateurs -->
+          <section id="usersView" hidden>
+            <div class="page-head">
+              <h1>Utilisateurs</h1>
+              <button class="btn" id="newUserBtn"><span data-ic="plus"></span> Nouvel utilisateur</button>
+            </div>
+            <p class="hint">L'administrateur a tous les droits et gère les comptes. Les autres utilisateurs n'ont accès qu'aux fonctions cochées.</p>
+            <div id="usersList" class="jobs"></div>
+          </section>
+
+          <!-- Dossier -->
+          <section id="folderView" hidden>
+            <div class="crumbs" id="crumbs"></div>
+            <div class="page-head">
+              <h1 id="folderTitle"></h1>
+              <div class="actions" id="folderActions">
+                <button class="btn ghost small" id="subfolderBtn"><span data-ic="plus"></span> Sous-dossier</button>
+                <button class="btn ghost small" id="renameBtn">Renommer</button>
+                <button class="btn ghost small danger" id="deleteFolderBtn">Supprimer</button>
+              </div>
+            </div>
+
+            <div class="subfolders" id="subfolders"></div>
+
+            <div class="card" id="jobFormCard">
+              <h3>Nouveau traitement</h3>
+              <form id="jobForm" class="job-form">
+                <label class="full">Lien YouTube
+                  <input name="youtube_url" type="url" required placeholder="https://www.youtube.com/watch?v=…">
+                </label>
+                <label>Nom
+                  <input name="title" required placeholder="La foi qui déplace les montagnes">
+                </label>
+                <label>Date
+                  <input name="date" type="date" required>
+                </label>
+                <label class="full">Intro
+                  <select name="intro_id" id="jobIntroSelect"></select>
+                </label>
+                <details class="full">
+                  <summary>Options : forcer le début et la fin de la prédication</summary>
+                  <div class="row">
+                    <label>Début <input name="start" placeholder="1:05:30"></label>
+                    <label>Fin <input name="end" placeholder="2:10:00"></label>
+                  </div>
+                  <p class="hint">Laisser vide pour une détection automatique. Renseigner ces champs évite l'étape de repérage (plus rapide).</p>
+                </details>
+                <details class="full">
+                  <summary>Ajouter plusieurs liens d'un coup</summary>
+                  <textarea id="batchText" rows="5" placeholder="https://youtube.com/watch?v=… | La foi qui déplace les montagnes | 2026-10-11&#10;https://youtube.com/watch?v=… | Le pouvoir de la prière"></textarea>
+                  <p class="hint">Une ligne par traitement : <b>lien | nom | date</b> (date facultative : celle du formulaire est utilisée). Ils sont traités dans l'ordre, selon le nombre de traitements en parallèle. Les lignes en erreur restent dans la zone.</p>
+                  <button class="btn small" type="button" id="batchBtn">Ajouter tout à la file</button>
+                </details>
+                <div class="full form-foot">
+                  <span class="hint" id="filenamePreview"></span>
+                  <button class="btn" type="submit">Lancer le traitement</button>
+                </div>
+              </form>
+            </div>
+
+            <div class="card">
+              <div class="intro-row">
+                <div>
+                  <h3>Intro de ce dossier</h3>
+                  <div class="muted" id="folderIntroNote"></div>
+                </div>
+                <select id="folderIntroSelect"></select>
+              </div>
+              <div id="folderIntroPlayer"></div>
+            </div>
+
+            <h3 class="section-title">Traitements</h3>
+            <div id="jobs" class="jobs"></div>
+          </section>
+        </div>
+      </main>
+    </div>
   </div>
 
+  <!-- Détails d'un traitement -->
   <dialog id="detailDialog" class="wide">
     <div class="dialog-head">
       <h3 id="detailTitle">Détails</h3>
@@ -131,6 +197,7 @@
     <div id="detailBody"></div>
   </dialog>
 
+  <!-- Bibliothèque d'intros -->
   <dialog id="introDialog" class="wide">
     <div class="dialog-head">
       <h3>Bibliothèque d'intros (MP3)</h3>
@@ -149,25 +216,7 @@
     </form>
   </dialog>
 
-  <dialog id="retryDialog">
-    <form method="dialog" id="retryForm">
-      <h3>Relancer le traitement</h3>
-      <p class="hint">Corrigez les bornes si la prédication détectée n'était pas la bonne. Laisser vide = détection automatique.</p>
-      <div class="row">
-        <label>Début <input name="start" placeholder="1:05:30"></label>
-        <label>Fin <input name="end" placeholder="2:10:00"></label>
-      </div>
-      <label class="stack">Intro
-        <select name="intro_id" id="retryIntroSelect"></select>
-      </label>
-      <div class="dialog-foot">
-        <button class="btn ghost" value="cancel" type="button" id="retryCancel">Annuler</button>
-        <button class="btn" value="ok">Relancer</button>
-      </div>
-    </form>
-  </dialog>
-
-  <div id="toast" class="toast" hidden></div>
+  <div id="toasts" class="toasts"></div>
   <script src="/static/app.js"></script>
 </body>
 </html>

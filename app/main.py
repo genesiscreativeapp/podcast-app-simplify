@@ -1,5 +1,5 @@
 """API web + interface."""
-import base64
+import re
 import secrets
 import shutil
 from datetime import date as date_cls, datetime
@@ -11,9 +11,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import or_
 
-from . import config, storage
+from . import auth, config, storage
 from .pipeline import audio
-from .db import (MAX_PARALLEL_LIMIT, Folder, Intro, Job, Setting, SessionLocal, folder_path,
+from .db import (MAX_PARALLEL_LIMIT, Folder, Intro, Job, Setting, SessionLocal, User, folder_path,
                  get_max_parallel, init_db, queue_position)
 from .pipeline import steps
 from .utils import fmt_time, parse_time, slugify
@@ -23,24 +23,20 @@ MAX_INTRO_BYTES = 25 * 1024 * 1024
 
 app = FastAPI(title="Studio Podcast")
 init_db()
+auth.bootstrap_admin()
 
 
-# --- Authentification HTTP Basic ---------------------------------------------
+# --- Authentification par session (cookie) ------------------------------------------------
+# Publics : l'interface (page de connexion incluse), ses fichiers statiques, /healthz et la connexion.
 @app.middleware("http")
-async def basic_auth(request: Request, call_next):
-    if config.APP_PASSWORD and request.url.path != "/healthz":
-        ok = False
-        header = request.headers.get("authorization", "")
-        if header.lower().startswith("basic "):
-            try:
-                user, _, pwd = base64.b64decode(header[6:]).decode().partition(":")
-                ok = (secrets.compare_digest(user, config.APP_USER)
-                      and secrets.compare_digest(pwd, config.APP_PASSWORD))
-            except Exception:
-                ok = False
-        if not ok:
-            return Response("Authentification requise", status_code=401,
-                            headers={"WWW-Authenticate": 'Basic realm="Studio Podcast"'})
+async def session_auth(request: Request, call_next):
+    request.state.user = None
+    path = request.url.path
+    if path.startswith("/api/") and path != "/api/auth/login":
+        with SessionLocal() as s:
+            request.state.user = auth.user_from_token(s, request.cookies.get(auth.COOKIE))
+        if request.state.user is None:
+            return JSONResponse({"detail": "Non connecté"}, status_code=401)
     return await call_next(request)
 
 
@@ -60,6 +56,8 @@ def job_steps(j: Job) -> list[dict]:
         skipped.add("detect")  # bornes saisies : pas de repérage
     if not (j.r2_key_mp3 if j.status == "done" else storage.enabled()):
         skipped.add("upload")
+    if not (config.REMOVE_OFFTOPIC and config.LLM_PROVIDER in ("anthropic", "openai")):
+        skipped.add("clean")  # témoignages et annonces : nécessite une IA
     return steps.view(j.progress or 0.0, j.status, skipped)
 
 
@@ -79,6 +77,7 @@ def job_dict(j: Job, with_log: bool = False, s=None) -> dict:
         "on_r2": bool(j.r2_key_mp3),
         "created_at": j.created_at.isoformat() if j.created_at else None,
         "finished_at": j.finished_at.isoformat() if j.finished_at else None,
+        "edit_note": j.edit_note, "created_by": j.created_by,
     }
     if s is not None:
         folder = s.get(Folder, j.folder_id)
@@ -99,12 +98,12 @@ class FolderRename(BaseModel):
     name: str
 
 
-@app.get("/api/folders")
+@app.get("/api/folders", dependencies=[Depends(auth.need("jobs.view"))])
 def list_folders(s=Depends(db)):
     return [folder_dict(f) for f in s.query(Folder).order_by(Folder.name).all()]
 
 
-@app.post("/api/folders")
+@app.post("/api/folders", dependencies=[Depends(auth.need("folders.manage"))])
 def create_folder(body: FolderIn, s=Depends(db)):
     name = body.name.strip()
     if not name:
@@ -117,7 +116,7 @@ def create_folder(body: FolderIn, s=Depends(db)):
     return folder_dict(f)
 
 
-@app.patch("/api/folders/{folder_id}")
+@app.patch("/api/folders/{folder_id}", dependencies=[Depends(auth.need("folders.manage"))])
 def rename_folder(folder_id: int, body: FolderRename, s=Depends(db)):
     f = s.get(Folder, folder_id) or _404("Dossier")
     if not body.name.strip():
@@ -127,7 +126,7 @@ def rename_folder(folder_id: int, body: FolderRename, s=Depends(db)):
     return folder_dict(f)
 
 
-@app.delete("/api/folders/{folder_id}")
+@app.delete("/api/folders/{folder_id}", dependencies=[Depends(auth.need("folders.manage"))])
 def delete_folder(folder_id: int, s=Depends(db)):
     f = s.get(Folder, folder_id) or _404("Dossier")
     if s.query(Folder).filter(Folder.parent_id == folder_id).count() or \
@@ -142,7 +141,7 @@ class FolderIntro(BaseModel):
     intro_id: int | None = None  # None = hériter du parent / intro par défaut
 
 
-@app.put("/api/folders/{folder_id}/intro")
+@app.put("/api/folders/{folder_id}/intro", dependencies=[Depends(auth.need("folders.manage"))])
 def set_folder_intro(folder_id: int, body: FolderIntro, s=Depends(db)):
     f = s.get(Folder, folder_id) or _404("Dossier")
     if body.intro_id is not None and not s.get(Intro, body.intro_id):
@@ -163,12 +162,12 @@ class IntroPatch(BaseModel):
     is_default: bool | None = None
 
 
-@app.get("/api/intros")
+@app.get("/api/intros", dependencies=[Depends(auth.need("jobs.view"))])
 def list_intros(s=Depends(db)):
     return [intro_dict(i) for i in s.query(Intro).order_by(Intro.is_default.desc(), Intro.name).all()]
 
 
-@app.post("/api/intros")
+@app.post("/api/intros", dependencies=[Depends(auth.need("intros.manage"))])
 def upload_intro(file: UploadFile = File(...), name: str = Form(""), is_default: bool = Form(False),
                  s=Depends(db)):
     if Path(file.filename or "").suffix.lower() != ".mp3":
@@ -198,7 +197,7 @@ def upload_intro(file: UploadFile = File(...), name: str = Form(""), is_default:
     return intro_dict(intro)
 
 
-@app.patch("/api/intros/{intro_id}")
+@app.patch("/api/intros/{intro_id}", dependencies=[Depends(auth.need("intros.manage"))])
 def update_intro(intro_id: int, body: IntroPatch, s=Depends(db)):
     intro = s.get(Intro, intro_id) or _404("Intro")
     if body.name is not None:
@@ -212,7 +211,7 @@ def update_intro(intro_id: int, body: IntroPatch, s=Depends(db)):
     return intro_dict(intro)
 
 
-@app.delete("/api/intros/{intro_id}")
+@app.delete("/api/intros/{intro_id}", dependencies=[Depends(auth.need("intros.manage"))])
 def delete_intro(intro_id: int, s=Depends(db)):
     intro = s.get(Intro, intro_id) or _404("Intro")
     # Les dossiers et traitements qui l'utilisaient repassent en « automatique »
@@ -224,7 +223,7 @@ def delete_intro(intro_id: int, s=Depends(db)):
     return {"ok": True, "was_default": intro.is_default}
 
 
-@app.get("/api/intros/{intro_id}/audio")
+@app.get("/api/intros/{intro_id}/audio", dependencies=[Depends(auth.need("jobs.view"))])
 def play_intro(intro_id: int, s=Depends(db)):
     intro = s.get(Intro, intro_id) or _404("Intro")
     if not Path(intro.path).exists():
@@ -264,15 +263,15 @@ def _times(start, end):
     return s, e
 
 
-@app.get("/api/folders/{folder_id}/jobs")
+@app.get("/api/folders/{folder_id}/jobs", dependencies=[Depends(auth.need("jobs.view"))])
 def list_jobs(folder_id: int, s=Depends(db)):
     jobs = (s.query(Job).filter(Job.folder_id == folder_id)
             .order_by(Job.date.desc(), Job.id.desc()).all())
     return [job_dict(j, s=s) for j in jobs]
 
 
-@app.post("/api/jobs")
-def create_job(body: JobIn, s=Depends(db)):
+@app.post("/api/jobs", dependencies=[Depends(auth.need("jobs.create"))])
+def create_job(body: JobIn, request: Request, s=Depends(db)):
     if not s.get(Folder, body.folder_id):
         raise HTTPException(404, "Dossier introuvable")
     url = body.youtube_url.strip()
@@ -288,14 +287,14 @@ def create_job(body: JobIn, s=Depends(db)):
         raise HTTPException(400, "Date invalide (AAAA-MM-JJ)")
     start, end = _times(body.start, body.end)
     _check_intro(s, body.intro_id)
-    job = Job(folder_id=body.folder_id, intro_id=body.intro_id, youtube_url=url, title=title, date=day,
+    job = Job(folder_id=body.folder_id, intro_id=body.intro_id, created_by=request.state.user.username, youtube_url=url, title=title, date=day,
               filename=f"{slugify(title)}_{day}", start_override=start, end_override=end)
     s.add(job)
     s.commit()
     return job_dict(job, s=s)
 
 
-@app.get("/api/jobs")
+@app.get("/api/jobs", dependencies=[Depends(auth.need("jobs.view"))])
 def history(q: str = "", status: str = "", limit: int = 50, offset: int = 0, s=Depends(db)):
     """Historique de tous les traitements, tous dossiers confondus (le plus récent d'abord)."""
     query = s.query(Job)
@@ -313,7 +312,7 @@ def history(q: str = "", status: str = "", limit: int = 50, offset: int = 0, s=D
     return {"total": total, "items": [job_dict(j, s=s) for j in jobs]}
 
 
-@app.get("/api/jobs/{job_id}")
+@app.get("/api/jobs/{job_id}", dependencies=[Depends(auth.need("jobs.view"))])
 def get_job(job_id: int, s=Depends(db)):
     job = s.get(Job, job_id) or _404("Traitement")
     d = job_dict(job, with_log=True, s=s)
@@ -330,7 +329,7 @@ def get_job(job_id: int, s=Depends(db)):
     return d
 
 
-@app.post("/api/jobs/{job_id}/retry")
+@app.post("/api/jobs/{job_id}/retry", dependencies=[Depends(auth.need("jobs.create"))])
 def retry_job(job_id: int, body: RetryIn, s=Depends(db)):
     job = s.get(Job, job_id) or _404("Traitement")
     if job.status == "running":
@@ -346,7 +345,7 @@ def retry_job(job_id: int, body: RetryIn, s=Depends(db)):
     return job_dict(job, s=s)
 
 
-@app.delete("/api/jobs/{job_id}")
+@app.delete("/api/jobs/{job_id}", dependencies=[Depends(auth.need("jobs.delete"))])
 def delete_job(job_id: int, s=Depends(db)):
     job = s.get(Job, job_id) or _404("Traitement")
     if job.status == "running":
@@ -362,7 +361,7 @@ def delete_job(job_id: int, s=Depends(db)):
     return {"ok": True}
 
 
-@app.get("/api/jobs/{job_id}/file/{fmt}")
+@app.get("/api/jobs/{job_id}/file/{fmt}", dependencies=[Depends(auth.need("jobs.view"))])
 def job_file(job_id: int, fmt: str, download: bool = False, s=Depends(db)):
     job = s.get(Job, job_id) or _404("Traitement")
     path = job.local_mp3 if fmt == "mp3" else None
@@ -372,7 +371,7 @@ def job_file(job_id: int, fmt: str, download: bool = False, s=Depends(db)):
                         filename=Path(path).name if download else None)
 
 
-@app.get("/api/jobs/{job_id}/link/{fmt}")
+@app.get("/api/jobs/{job_id}/link/{fmt}", dependencies=[Depends(auth.need("jobs.view"))])
 def job_link(job_id: int, fmt: str, s=Depends(db)):
     job = s.get(Job, job_id) or _404("Traitement")
     key = job.r2_key_mp3 if fmt == "mp3" else None
@@ -381,7 +380,7 @@ def job_link(job_id: int, fmt: str, s=Depends(db)):
     return {"url": storage.link(key), "public": bool(config.R2_PUBLIC_BASE_URL)}
 
 
-@app.get("/api/status")
+@app.get("/api/status", dependencies=[Depends(auth.need("jobs.view"))])
 def status(s=Depends(db)):
     count = lambda st: s.query(Job).filter(Job.status == st).count()
     return {
@@ -396,13 +395,160 @@ class SettingsIn(BaseModel):
     max_parallel: int
 
 
-@app.put("/api/settings")
+@app.put("/api/settings", dependencies=[Depends(auth.need("settings.manage"))])
 def put_settings(body: SettingsIn, s=Depends(db)):
     if not 1 <= body.max_parallel <= MAX_PARALLEL_LIMIT:
         raise HTTPException(400, f"Entre 1 et {MAX_PARALLEL_LIMIT} traitements en parallèle")
     s.merge(Setting(key="max_parallel", value=str(body.max_parallel)))
     s.commit()
     return {"max_parallel": body.max_parallel}
+
+
+# --- Connexion et comptes ---------------------------------------------------------------------
+class LoginIn(BaseModel):
+    username: str
+    password: str
+
+
+class PasswordIn(BaseModel):
+    current: str
+    new: str
+
+
+class UserIn(BaseModel):
+    username: str
+    display_name: str = ""
+    password: str
+    is_admin: bool = False
+    permissions: list[str] = []
+
+
+class UserPatch(BaseModel):
+    display_name: str | None = None
+    password: str | None = None
+    is_admin: bool | None = None
+    is_active: bool | None = None
+    permissions: list[str] | None = None
+
+
+def _clean_perms(perms: list[str]) -> str:
+    return ",".join(sorted(set(perms) & set(auth.PERMISSIONS)))
+
+
+@app.post("/api/auth/login")
+def login(body: LoginIn, request: Request, response: Response, s=Depends(db)):
+    name = body.username.strip().lower()
+    keys = [f"ip:{request.client.host if request.client else '?'}", f"user:{name}"]
+    for k in keys:
+        auth.throttle_check(k)
+    user = s.query(User).filter(User.username == name).first()
+    # on vérifie toujours un hash, même si le compte n'existe pas (temps de réponse identique)
+    ok = auth.verify_password(body.password, user.password_hash if user else auth.hash_password("x"))
+    if not (user and ok and user.is_active):
+        for k in keys:
+            auth.throttle_fail(k)
+        raise HTTPException(401, "Identifiant ou mot de passe incorrect")
+    for k in keys:
+        auth.throttle_reset(k)
+    token = auth.create_session(s, user)
+    response.set_cookie(auth.COOKIE, token, httponly=True, samesite="lax", path="/",
+                        secure=request.url.scheme == "https", max_age=config.SESSION_DAYS * 86400)
+    return auth.user_dict(user)
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request, response: Response, s=Depends(db)):
+    auth.drop_token(s, request.cookies.get(auth.COOKIE))
+    s.commit()
+    response.delete_cookie(auth.COOKIE, path="/")
+    return {"ok": True}
+
+
+@app.get("/api/auth/me")
+def me(request: Request):
+    return {**auth.user_dict(request.state.user), "catalog": auth.PERMISSIONS}
+
+
+@app.post("/api/auth/password")
+def change_password(body: PasswordIn, request: Request, s=Depends(db)):
+    user = s.get(User, request.state.user.id)
+    if not auth.verify_password(body.current, user.password_hash):
+        raise HTTPException(400, "Mot de passe actuel incorrect")
+    auth.check_password_strength(body.new)
+    user.password_hash = auth.hash_password(body.new)
+    token = request.cookies.get(auth.COOKIE)
+    auth.drop_sessions(s, user.id)  # les autres appareils doivent se reconnecter
+    s.commit()
+    new_token = auth.create_session(s, user)
+    resp = JSONResponse({"ok": True})
+    resp.set_cookie(auth.COOKIE, new_token, httponly=True, samesite="lax", path="/",
+                    secure=request.url.scheme == "https", max_age=config.SESSION_DAYS * 86400)
+    return resp
+
+
+@app.get("/api/users", dependencies=[Depends(auth.need("admin"))])
+def list_users(s=Depends(db)):
+    return [auth.user_dict(u) for u in s.query(User).order_by(User.username).all()]
+
+
+@app.post("/api/users", dependencies=[Depends(auth.need("admin"))])
+def create_user(body: UserIn, s=Depends(db)):
+    name = body.username.strip().lower()
+    if not re.fullmatch(r"[a-z0-9._-]{3,40}", name):
+        raise HTTPException(400, "Identifiant : 3 à 40 caractères (lettres, chiffres, . _ -)")
+    if s.query(User).filter(User.username == name).first():
+        raise HTTPException(400, "Cet identifiant existe déjà")
+    auth.check_password_strength(body.password)
+    user = User(username=name, display_name=body.display_name.strip(), is_admin=body.is_admin,
+                permissions=_clean_perms(body.permissions), password_hash=auth.hash_password(body.password))
+    s.add(user)
+    s.commit()
+    return auth.user_dict(user)
+
+
+def _other_active_admins(s, user_id: int) -> int:
+    return s.query(User).filter(User.is_admin, User.is_active, User.id != user_id).count()
+
+
+@app.patch("/api/users/{user_id}")
+def update_user(user_id: int, body: UserPatch, request: Request, s=Depends(db),
+                _=Depends(auth.need("admin"))):
+    user = s.get(User, user_id) or _404("Utilisateur")
+    me_id = request.state.user.id
+    losing_admin = (body.is_admin is False and user.is_admin) or (body.is_active is False and user.is_admin)
+    if losing_admin and not _other_active_admins(s, user_id):
+        raise HTTPException(400, "Il doit rester au moins un administrateur actif")
+    if user_id == me_id and (body.is_active is False or body.is_admin is False):
+        raise HTTPException(400, "Vous ne pouvez pas retirer vos propres droits ni désactiver votre compte")
+    if body.display_name is not None:
+        user.display_name = body.display_name.strip()
+    if body.is_admin is not None:
+        user.is_admin = body.is_admin
+    if body.permissions is not None:
+        user.permissions = _clean_perms(body.permissions)
+    if body.password:
+        auth.check_password_strength(body.password)
+        user.password_hash = auth.hash_password(body.password)
+        auth.drop_sessions(s, user_id)
+    if body.is_active is not None:
+        user.is_active = body.is_active
+        if not body.is_active:
+            auth.drop_sessions(s, user_id)
+    s.commit()
+    return auth.user_dict(user)
+
+
+@app.delete("/api/users/{user_id}")
+def delete_user(user_id: int, request: Request, s=Depends(db), _=Depends(auth.need("admin"))):
+    user = s.get(User, user_id) or _404("Utilisateur")
+    if user_id == request.state.user.id:
+        raise HTTPException(400, "Vous ne pouvez pas supprimer votre propre compte")
+    if user.is_admin and not _other_active_admins(s, user_id):
+        raise HTTPException(400, "Il doit rester au moins un administrateur actif")
+    auth.drop_sessions(s, user_id)
+    s.delete(user)
+    s.commit()
+    return {"ok": True}
 
 
 @app.get("/healthz")

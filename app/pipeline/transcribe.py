@@ -51,7 +51,7 @@ class _Progress:
                 self.cb(min(self.done / self.total, 1.0))
 
 
-def _segments(model_name: str, audio: np.ndarray, words: bool, beam: int):
+def _segments(model_name: str, audio: np.ndarray, words: bool, beam: int, prompt: str | None = None):
     segments, _info = _model(model_name).transcribe(
         audio,
         language=config.WHISPER_LANGUAGE,
@@ -59,6 +59,7 @@ def _segments(model_name: str, audio: np.ndarray, words: bool, beam: int):
         word_timestamps=words,
         beam_size=beam,
         condition_on_previous_text=False, # évite les boucles d'hallucination sur la musique
+        initial_prompt=prompt or None,    # amorce : transcrire aussi les « euh » et les répétitions
     )
     for seg in segments:
         yield seg
@@ -102,7 +103,8 @@ def transcribe_words(wav16: Path, duration: float,
         a, b = span
         audio = _read(wav16, a, b - a)
         out, last = [], 0.0
-        for seg in _segments(config.WHISPER_MODEL_EDIT, audio, True, config.WHISPER_BEAM_EDIT):
+        for seg in _segments(config.WHISPER_MODEL_EDIT, audio, True, config.WHISPER_BEAM_EDIT,
+                             config.WHISPER_PROMPT):
             out.append({
                 "start": a + seg.start, "end": a + seg.end, "text": seg.text.strip(),
                 "words": [{"start": a + w.start, "end": a + w.end, "word": w.word}

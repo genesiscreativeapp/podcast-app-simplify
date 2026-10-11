@@ -12,7 +12,7 @@ import unicodedata
 import numpy as np
 import soundfile as sf
 
-FILLERS = {"euh", "euhh", "heu", "heuu", "hum", "hmm", "hmmm", "mmh", "mh", "bah"}
+FILLERS = {"euh", "euhh", "euhhh", "euhm", "heu", "heuu", "heum", "hum", "hmm", "hmmm", "mmh", "mmm", "mh", "ehm", "bah"}
 PROTECTED = {"amen", "alleluia", "gloire", "oui", "non", "saint", "merci", "jesus",
              "seigneur", "dieu", "hosanna", "louange"}
 
@@ -63,11 +63,15 @@ def silence_cuts(audio: np.ndarray, sr: int, max_pause: float, target_pause: flo
     return cuts
 
 
-def word_cuts(words: list[dict], remove_fillers: bool, remove_repeats: bool) -> tuple[list, dict]:
+def word_cuts(words: list[dict], remove_fillers: bool, remove_repeats: bool,
+              max_gap: float = 1.0, max_words: int = 8) -> tuple[list, dict]:
+    """Retire les « euh » et les mots ou phrases répétés d'affilée (« la foi, la foi », « Dieu est bon,
+    Dieu est bon »). Une pause de plus de `max_gap` secondes entre les deux copies signale une vraie
+    reprise : on la garde. On garde la dernière copie, souvent la mieux articulée."""
     n = len(words)
     norm = [_norm(w["word"]) for w in words]
     remove = [False] * n
-    stats = {"fillers": 0, "repeats": 0}
+    stats = {"fillers": 0, "repeats": 0, "examples": []}
 
     if remove_fillers:
         for i, w in enumerate(norm):
@@ -79,20 +83,16 @@ def word_cuts(words: list[dict], remove_fillers: bool, remove_repeats: bool) -> 
         i = 0
         while i < n:
             matched = False
-            for k in (3, 2, 1):
-                if i + 2 * k > n:
-                    continue
+            for k in range(min(max_words, (n - i) // 2), 0, -1):
                 a, b = norm[i:i + k], norm[i + k:i + 2 * k]
-                if a != b or not all(a) or any(x in PROTECTED for x in a):
+                if a != b or not all(a) or all(x in PROTECTED for x in a):
                     continue
-                if k == 1 and len(a[0]) > 3:  # 1 mot : seulement les petits (« le le », « je je »)
-                    continue
-                gap = words[i + k]["start"] - words[i + k - 1]["end"]
-                if gap > 0.5:                  # répétition avec pause = emphase volontaire
+                if words[i + k]["start"] - words[i + k - 1]["end"] > max_gap:
                     continue
                 for j in range(i, i + k):
                     remove[j] = True
                 stats["repeats"] += 1
+                stats["examples"].append(" ".join(w["word"].strip() for w in words[i:i + k]))
                 i += k
                 matched = True
                 break
@@ -146,14 +146,15 @@ def render(audio: np.ndarray, sr: int, keep: list[tuple[float, float]], xfade_ms
 
 
 def edit_file(src, dst, words: list[dict], max_pause: float, target_pause: float,
-              remove_fillers: bool = True, remove_repeats: bool = True) -> dict:
+              remove_fillers: bool = True, remove_repeats: bool = True,
+              extra_cuts: list[tuple[float, float]] = (), repeat_gap: float = 1.0, repeat_words: int = 8) -> dict:
     audio, sr = sf.read(str(src), dtype="float32")
     if audio.ndim > 1:
         audio = audio.mean(axis=1)
     total = len(audio) / sr
     s_cuts = silence_cuts(audio, sr, max_pause, target_pause)
-    w_cuts, stats = word_cuts(words, remove_fillers, remove_repeats)
-    keep = keep_intervals(s_cuts + w_cuts, total)
+    w_cuts, stats = word_cuts(words, remove_fillers, remove_repeats, repeat_gap, repeat_words)
+    keep = keep_intervals(s_cuts + w_cuts + list(extra_cuts), total)
     if not keep:
         keep = [(0.0, total)]
     result = render(audio, sr, keep)

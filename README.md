@@ -15,7 +15,7 @@ mkdir -p data
 docker compose up -d --build
 ```
 
-L'interface écoute sur le port **3000** du conteneur `web` (identifiants : `APP_USER` / `APP_PASSWORD`). Le port n'est pas publié sur l'hôte : en local, ajoutez `ports: ["3000:3000"]` au service `web` pour ouvrir `http://localhost:3000`.
+À la première connexion, le compte administrateur est celui de `APP_USER` / `APP_PASSWORD` (créé une seule fois ; ensuite les comptes se gèrent dans l'interface). L'interface écoute sur le port **3000** du conteneur `web` Le port n'est pas publié sur l'hôte : en local, ajoutez `ports: ["3000:3000"]` au service `web` pour ouvrir `http://localhost:3000`.
 Sur Coolify, déployez en « Docker Compose » et routez le domaine vers le service `web`, avec le port : `https://votre-domaine:3000`.
 
 Au premier traitement, les modèles Whisper sont téléchargés dans `data/models` (≈ 150 Mo pour `base`, ≈ 500 Mo pour `small`).
@@ -27,6 +27,11 @@ Au premier traitement, les modèles Whisper sont téléchargés dans `data/model
 3. Coller le lien YouTube, le nom et la date, puis **Lancer le traitement** — ou **Ajouter plusieurs liens d'un coup** (une ligne `lien | nom | date` par traitement).
 4. Suivre l'avancement en direct, écouter le résultat, télécharger le MP3 ou copier le lien R2.
 5. Si la prédication détectée n'est pas la bonne : **Relancer** en saisissant le début et la fin (format `1:05:30`).
+
+## Connexion, utilisateurs et permissions
+
+- Écran de connexion avec session (cookie `HttpOnly`) ; 5 échecs en 5 minutes bloquent les essais pendant quelques minutes.
+- **Utilisateurs** (administrateur) : créer des comptes, les activer/désactiver, réinitialiser un mot de passe et choisir les fonctions autorisées : voir et télécharger, lancer/relancer, supprimer, gérer les dossiers, gérer les intros, régler le parallélisme. L'administrateur a tous les droits et seul gère les comptes. Chaque utilisateur peut changer son mot de passe (menu en haut à droite).
 
 ## Historique, détails et liens directs
 
@@ -40,6 +45,14 @@ Au premier traitement, les modèles Whisper sont téléchargés dans `data/model
 - **Sans LLM** : une heuristique retient la plus longue zone de parole dense. La louange chantée a un débit de mots plus faible et les annonces sont courtes. Cela fonctionne bien quand le culte est classique, moins bien avec un long temps de prière parlée.
 - **Bornes manuelles** : si vous les saisissez, l'étape de repérage est sautée et le traitement est bien plus rapide.
 
+## Adoration, témoignages, annonces
+
+Avec une IA configurée (`LLM_PROVIDER`), le traitement est prudent à deux niveaux :
+1. **Repérage** : le début est l'instant où le prédicateur commence à enseigner, pas l'adoration, la louange ni les prières qui précèdent ; en cas de doute, l'IA choisit plus tôt.
+2. **Retrait précis** : une marge (`OFFTOPIC_PAD_BEFORE` / `OFFTOPIC_PAD_AFTER`, 90 s et 60 s) est ajoutée autour de la prédication, puis l'IA relit la transcription fine et retire, ligne par ligne, l'adoration, les témoignages, les annonces, les offrandes et les autres voix. Elle ne retire jamais une illustration du prédicateur ni sa prière de fin ; en cas de doute, elle garde. Si elle veut retirer plus de la moitié, ou si elle ne répond pas, rien n'est retiré et on revient aux bornes repérées.
+
+Le bilan (passages retirés, avec leurs horaires) est visible dans les détails du traitement (« Montage »). **Vérifiez les premiers podcasts à l'écoute.** Sans IA, ces passages ne sont pas retirés ; saisir les bornes à la main reste possible.
+
 ## Nettoyage
 
 | Élément | Méthode | Réglage |
@@ -47,10 +60,10 @@ Au premier traitement, les modèles Whisper sont téléchargés dans `data/model
 | Silences | Détection sur l'énergie du signal : une zone sonore n'est jamais coupée | `MAX_PAUSE`, `TARGET_PAUSE` |
 | Bruit, souffle | Filtres ffmpeg (passe-haut, réduction de bruit FFT, compresseur) | `app/pipeline/audio.py` |
 | « euh », « hum » | Horodatages mot à mot de Whisper | `REMOVE_FILLERS` |
-| Bégaiements (« le le », « je vais je vais ») | Répétitions **immédiates** uniquement | `REMOVE_REPEATS` |
+| Mots et phrases répétés (« la foi, la foi », « Dieu est bon, Dieu est bon ») | Répétitions **immédiates** (pause < `REPEAT_MAX_GAP`, jusqu'à `REPEAT_MAX_WORDS` mots) ; la dernière copie est gardée | `REMOVE_REPEATS` |
 | Volume | Normalisation à -16 LUFS (standard podcast) | — |
 
-Les répétitions d'emphase dites avec une pause (« Il est fidèle… il est fidèle ! ») et les mots comme « amen » ou « alléluia » sont volontairement préservés.
+Les mots comme « amen » ou « alléluia » répétés seuls sont préservés. Whisper est amorcé (`WHISPER_PROMPT`) pour transcrire aussi les « euh » et répétitions. Pour une voix moins métallique : `DENOISE_DB` (réduction de bruit, 0 = aucune).
 
 ## Durées sur CPU (ordre de grandeur, 4 cœurs, à mesurer sur votre serveur)
 
@@ -61,11 +74,11 @@ Le traitement est optimisé pour les cultes de 4 h 30 et plus :
 - **YouTube** : audio léger (≈ 50-70 kb/s) téléchargé par 4 fragments simultanés ; il est gardé en cache, donc **Relancer** ne retélécharge rien.
 
 Pour aller plus vite : saisir les bornes (le repérage disparaît), `DETECT_CLIP=10`. Pour plus de précision : `WHISPER_MODEL_DETECT=base`, `WHISPER_BEAM_EDIT=5`, `YTDLP_FORMAT=bestaudio/best`.
-Plusieurs traitements peuvent tourner en même temps (réglage **Parallèle** en haut de l'interface, 1 à 8, `MAX_PARALLEL_JOBS` au démarrage). Les autres attendent en file, affichés « n° 1, n° 2… », et le suivant démarre dès qu'une place se libère. Ils partagent les mêmes cœurs et les mêmes modèles Whisper : le gain vient surtout du chevauchement des étapes (téléchargement, ffmpeg, envoi) avec la transcription ; au-delà de 2-3, chacun va plus lentement. Chaque traitement garde l'audio de sa prédication en mémoire : surveillez la RAM avant d'augmenter le parallélisme.
+Plusieurs traitements peuvent tourner en même temps (réglage **Parallèle** en haut de l'interface, 1 à 20, `MAX_PARALLEL_JOBS` au démarrage). Les autres attendent en file, affichés « n° 1, n° 2… », et le suivant démarre dès qu'une place se libère. Ils partagent les mêmes cœurs et les mêmes modèles Whisper : le gain vient surtout du chevauchement des étapes (téléchargement, ffmpeg, envoi) avec la transcription ; au-delà de 2-3, chacun va plus lentement. Chaque traitement garde l'audio de sa prédication en mémoire : surveillez la RAM avant d'augmenter le parallélisme.
 
 ## Taille des fichiers
 
-MP3 mono à 40 kb/s ≈ **18 Mo par heure** (`MP3_BITRATE`). `32k` (≈ 14 Mo/h) reste intelligible pour la voix ; `48k` (≈ 22 Mo/h) est plus fidèle.
+MP3 mono à 64 kb/s ≈ **29 Mo par heure** (`MP3_BITRATE`) : une voix naturelle. `48k` (≈ 22 Mo/h) est plus léger, `96k` (≈ 43 Mo/h) très fidèle. Si la voix vous semble métallique, baissez `DENOISE_DB` (réduction de bruit, 0 = aucune) ou montez `MP3_BITRATE`.
 
 ## Si YouTube bloque le serveur
 

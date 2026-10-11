@@ -12,6 +12,7 @@ from . import audio, steps
 from .detect import detect_sermon
 from .download import download
 from .edit import edit_file
+from .offtopic import find_offtopic
 from .transcribe import transcribe_sampled, transcribe_words
 
 
@@ -110,26 +111,57 @@ def run_job(job_id: int) -> None:
         rep._update(sermon_start=start, sermon_end=end, detection_note=note)
         rep.log(f"Prédication : {fmt_time(start)} → {fmt_time(end)} — {note}")
 
+        # Marge autour d'une prédication repérée automatiquement : l'IA retirera ensuite précisément
+        # l'adoration qui précède et les annonces qui suivent (sans IA, pas de marge)
+        offtopic_on = config.REMOVE_OFFTOPIC and config.LLM_PROVIDER in ("anthropic", "openai")
+        auto = start_ov is None and end_ov is None
+        pad_b = min(config.OFFTOPIC_PAD_BEFORE, start) if offtopic_on and auto else 0.0
+        pad_a = min(config.OFFTOPIC_PAD_AFTER, duration - end) if offtopic_on and auto else 0.0
+        win_start, win_end = start - pad_b, end + pad_a
+
         # 3b. Extraction + amélioration de la voix (un seul passage ffmpeg)
         rep.step("voice")
         clean = work / "clean.wav"
         clean16 = work / "clean16k.wav"
-        audio.extract_enhanced(src, start, end, clean, clean16, rep.sub("voice"))
+        audio.extract_enhanced(src, win_start, win_end, clean, clean16, rep.sub("voice"))
 
         # 3c. Transcription fine mot à mot (sur la prédication uniquement, lots en parallèle)
         rep.step("words")
         rep.log(f"Modèle {config.WHISPER_MODEL_EDIT}, {config.WHISPER_WORKERS} transcription(s) en parallèle")
-        segs = transcribe_words(clean16, end - start, rep.sub("words"))
+        segs = transcribe_words(clean16, win_end - win_start, rep.sub("words"))
         clean16.unlink(missing_ok=True)
         words = [w for s in segs for w in s["words"]]
+
+        # 3c'. Retrait des témoignages, annonces, chants... (IA)
+        extra_cuts, offtopic_note = [], ""
+        if offtopic_on:
+            rep.step("clean")
+            extra_cuts, offtopic_note, ok = find_offtopic(segs, rep.log)
+            if not ok and (pad_b or pad_a):
+                # l'IA n'a pas répondu : on revient exactement aux bornes repérées, sans la marge
+                total = win_end - win_start
+                extra_cuts = [(0.0, pad_b), (total - pad_a, total)]
+                offtopic_note = "IA indisponible : marge retirée, adoration et annonces éventuelles conservées"
+                rep.log(offtopic_note)
+            elif offtopic_note:
+                rep.log(offtopic_note)
+        else:
+            rep.log("Pas d'IA configurée : témoignages et annonces non retirés")
 
         # 3d. Montage : silences, « euh », répétitions
         rep.step("edit")
         edited = work / "edited.wav"
         stats = edit_file(clean, edited, words, config.MAX_PAUSE, config.TARGET_PAUSE,
-                          config.REMOVE_FILLERS, config.REMOVE_REPEATS)
-        rep.log(f"{stats['pauses']} silences raccourcis, {stats['fillers']} hésitations et "
-                f"{stats['repeats']} répétitions retirées : {fmt_time(stats['before'])} → {fmt_time(stats['after'])}")
+                          config.REMOVE_FILLERS, config.REMOVE_REPEATS, extra_cuts,
+                          config.REPEAT_MAX_GAP, config.REPEAT_MAX_WORDS)
+        examples = " ; ".join(f"« {e} »" for e in stats["examples"][:5])
+        note = [f"{stats['pauses']} silences raccourcis", f"{stats['fillers']} hésitations retirées",
+                f"{stats['repeats']} répétitions retirées" + (f" (ex. : {examples})" if examples else "")]
+        if offtopic_note:
+            note.append(offtopic_note)
+        note.append(f"durée {fmt_time(stats['before'])} → {fmt_time(stats['after'])}")
+        rep.log("Montage : " + " · ".join(note))
+        rep._update(edit_note="\n".join(note))
 
         # 4. Intro + normalisation du volume
         rep.step("master")
