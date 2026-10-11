@@ -1,0 +1,62 @@
+# Les variables sont lues depuis .env en local, ou depuis l'onglet « Environment Variables » de Coolify.
+# Une valeur vide = valeur par défaut de l'application (voir .env.example).
+x-env: &env
+  APP_USER: ${APP_USER:-}
+  APP_PASSWORD: ${APP_PASSWORD:-}
+  R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+  R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+  R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+  R2_BUCKET: ${R2_BUCKET:-}
+  R2_PREFIX: ${R2_PREFIX:-}
+  R2_PUBLIC_BASE_URL: ${R2_PUBLIC_BASE_URL:-}
+  R2_LINK_EXPIRES: ${R2_LINK_EXPIRES:-}
+  LLM_PROVIDER: ${LLM_PROVIDER:-}
+  LLM_API_KEY: ${LLM_API_KEY:-}
+  LLM_MODEL: ${LLM_MODEL:-}
+  LLM_BASE_URL: ${LLM_BASE_URL:-}
+  WHISPER_MODEL_DETECT: ${WHISPER_MODEL_DETECT:-}
+  DETECT_CLIP: ${DETECT_CLIP:-}
+  WHISPER_MODEL_EDIT: ${WHISPER_MODEL_EDIT:-}
+  WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-}
+  WHISPER_WORKERS: ${WHISPER_WORKERS:-}
+  WHISPER_THREADS: ${WHISPER_THREADS:-}
+  WHISPER_BEAM_EDIT: ${WHISPER_BEAM_EDIT:-}
+  MAX_PARALLEL_JOBS: ${MAX_PARALLEL_JOBS:-}
+  MAX_PAUSE: ${MAX_PAUSE:-}
+  TARGET_PAUSE: ${TARGET_PAUSE:-}
+  REMOVE_FILLERS: ${REMOVE_FILLERS:-}
+  REMOVE_REPEATS: ${REMOVE_REPEATS:-}
+  MP3_BITRATE: ${MP3_BITRATE:-}
+  PODCAST_ARTIST: ${PODCAST_ARTIST:-}
+  YTDLP_COOKIES: ${YTDLP_COOKIES:-}
+  YTDLP_FORMAT: ${YTDLP_FORMAT:-}
+  KEEP_SOURCES: ${KEEP_SOURCES:-}
+  KEEP_WORK_FILES: ${KEEP_WORK_FILES:-}
+
+services:
+  web:
+    build: .
+    restart: unless-stopped
+    environment: *env
+    expose:
+      - "8000"
+    volumes:
+      - data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  worker:
+    build: .
+    restart: unless-stopped
+    environment: *env
+    command: ["python", "-m", "app.worker"]
+    volumes:
+      - data:/data
+    stop_grace_period: 30s
+
+volumes:
+  data:

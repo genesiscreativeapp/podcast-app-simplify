@@ -1,8 +1,10 @@
 """Base SQLite : dossiers (arborescence) et traitements."""
+import time
 from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, create_engine, event, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from . import config
@@ -94,6 +96,18 @@ class Job(Base):
 
 
 def init_db() -> None:
+    # web et worker démarrent ensemble sur une base neuve : on réessaie si l'autre crée les tables en même temps
+    for attempt in range(5):
+        try:
+            _init_db()
+            return
+        except OperationalError:
+            if attempt == 4:
+                raise
+            time.sleep(1 + attempt)
+
+
+def _init_db() -> None:
     Base.metadata.create_all(engine)
     # Bases créées avant la bibliothèque d'intros : ajoute les colonnes manquantes
     with engine.begin() as conn:
