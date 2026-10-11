@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Studio Podcast</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <button class="icon-btn menu-btn" id="menuBtn" aria-label="Dossiers">☰</button>
+    <div class="brand"><span class="logo">◉</span> Studio Podcast</div>
+    <div class="status" id="statusBar"></div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar" id="sidebar">
+      <div class="side-head">
+        <span>Dossiers</span>
+        <button class="btn small" id="newRootBtn">+ Dossier</button>
+      </div>
+      <nav id="tree" class="tree"></nav>
+      <div class="side-foot">
+        <div class="label">Intro par défaut</div>
+        <div id="defaultIntro" class="muted">—</div>
+        <label class="btn small ghost">Choisir un fichier
+          <input type="file" accept="audio/*" id="defaultIntroInput" hidden>
+        </label>
+      </div>
+    </aside>
+
+    <main class="main" id="main">
+      <div class="empty" id="emptyState">
+        <h2>Bienvenue 👋</h2>
+        <p>Créez un dossier (par exemple <b>CULTE ROYAL</b>) puis collez-y un lien YouTube.<br>
+        Le traitement est entièrement automatique : téléchargement, extraction de la prédication,
+        nettoyage de la voix, intro, compression et envoi sur R2.</p>
+        <button class="btn" id="emptyNewBtn">+ Créer un dossier</button>
+      </div>
+
+      <section id="folderView" hidden>
+        <div class="crumbs" id="crumbs"></div>
+        <div class="folder-head">
+          <h1 id="folderTitle"></h1>
+          <div class="actions">
+            <button class="btn ghost small" id="subfolderBtn">+ Sous-dossier</button>
+            <button class="btn ghost small" id="renameBtn">Renommer</button>
+            <button class="btn ghost small danger" id="deleteFolderBtn">Supprimer</button>
+          </div>
+        </div>
+
+        <div class="subfolders" id="subfolders"></div>
+
+        <div class="card">
+          <h3>Nouveau traitement</h3>
+          <form id="jobForm" class="job-form">
+            <label class="full">Lien YouTube
+              <input name="youtube_url" type="url" required placeholder="https://www.youtube.com/watch?v=…">
+            </label>
+            <label>Nom
+              <input name="title" required placeholder="La foi qui déplace les montagnes">
+            </label>
+            <label>Date
+              <input name="date" type="date" required>
+            </label>
+            <details class="full">
+              <summary>Options : forcer le début et la fin de la prédication</summary>
+              <div class="row">
+                <label>Début <input name="start" placeholder="1:05:30"></label>
+                <label>Fin <input name="end" placeholder="2:10:00"></label>
+              </div>
+              <p class="hint">Laisser vide pour une détection automatique. Renseigner ces champs évite l'étape de repérage (plus rapide).</p>
+            </details>
+            <div class="full form-foot">
+              <span class="hint" id="filenamePreview"></span>
+              <button class="btn" type="submit">Lancer le traitement</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="card">
+          <div class="intro-row">
+            <div>
+              <h3>Intro de ce dossier</h3>
+              <div class="muted" id="folderIntro"></div>
+            </div>
+            <div class="actions">
+              <label class="btn small ghost">Choisir un fichier
+                <input type="file" accept="audio/*" id="folderIntroInput" hidden>
+              </label>
+              <button class="btn small ghost danger" id="removeIntroBtn" hidden>Retirer</button>
+            </div>
+          </div>
+        </div>
+
+        <h3 class="section-title">Traitements</h3>
+        <div id="jobs" class="jobs"></div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="logDialog">
+    <div class="dialog-head">
+      <h3 id="logTitle">Journal</h3>
+      <button class="icon-btn" id="logClose" aria-label="Fermer">✕</button>
+    </div>
+    <pre id="logBody"></pre>
+  </dialog>
+
+  <dialog id="retryDialog">
+    <form method="dialog" id="retryForm">
+      <h3>Relancer le traitement</h3>
+      <p class="hint">Corrigez les bornes si la prédication détectée n'était pas la bonne. Laisser vide = détection automatique.</p>
+      <div class="row">
+        <label>Début <input name="start" placeholder="1:05:30"></label>
+        <label>Fin <input name="end" placeholder="2:10:00"></label>
+      </div>
+      <div class="dialog-foot">
+        <button class="btn ghost" value="cancel" type="button" id="retryCancel">Annuler</button>
+        <button class="btn" value="ok">Relancer</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+# Secrets
+.env
+
+# Données du serveur (base, intros, podcasts, modèles Whisper, cookies)
+data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# macOS
+.DS_Store
+
+# Sauvegardes
+*.bak
