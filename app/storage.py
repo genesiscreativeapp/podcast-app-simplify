@@ -33,10 +33,12 @@ def build_key(folder_names: list[str], filename: str) -> str:
     return "/".join(parts)
 
 
-def upload(path: Path, key: str, content_type: str) -> None:
+def upload(path: Path, key: str, content_type: str, on_bytes=None) -> None:
+    """on_bytes(n) est appelé avec le nombre d'octets envoyés à chaque morceau."""
     _client().upload_file(
         str(path), config.R2_BUCKET, key,
         ExtraArgs={"ContentType": content_type, "CacheControl": "public, max-age=31536000"},
+        Callback=on_bytes,
     )
 
 

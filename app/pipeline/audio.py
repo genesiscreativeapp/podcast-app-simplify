@@ -1,17 +1,35 @@
 """Opérations ffmpeg : extraction, amélioration de la voix, intro, compression."""
 import subprocess
+import tempfile
 from pathlib import Path
+from typing import Callable
 
 SR = 24000  # fréquence de travail : Opus 24 kb/s ne dépasse pas 8 kHz de bande, inutile de traiter plus (2x moins de calcul et de mémoire)
 SR_WHISPER = 16000
 
 
-def run(cmd: list[str]) -> str:
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        tail = "\n".join(proc.stderr.strip().splitlines()[-15:])
-        raise RuntimeError(f"Échec de {cmd[0]} :\n{tail}")
-    return proc.stdout
+def run(cmd: list[str], duration: float | None = None,
+        on_progress: Callable[[float], None] | None = None) -> str:
+    """Lance une commande. Avec `duration` et `on_progress`, ffmpeg rapporte son avancement (0 → 1)."""
+    track = bool(on_progress and duration)
+    if track:
+        cmd = cmd[:1] + ["-progress", "pipe:1", "-nostats"] + cmd[1:]
+    out = []
+    with tempfile.TemporaryFile("w+") as err:  # fichier plutôt que pipe : pas de blocage si ffmpeg est bavard
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err, text=True)
+        for line in proc.stdout:
+            if track and line.startswith("out_time_us="):
+                try:
+                    on_progress(min(max(int(line.split("=")[1]) / 1e6 / duration, 0.0), 1.0))
+                except ValueError:  # « N/A » au démarrage
+                    pass
+            else:
+                out.append(line)
+        if proc.wait() != 0:
+            err.seek(0)
+            tail = "\n".join(err.read().strip().splitlines()[-15:])
+            raise RuntimeError(f"Échec de {cmd[0]} :\n{tail}")
+    return "".join(out)
 
 
 def probe_duration(path: Path) -> float:
@@ -20,10 +38,11 @@ def probe_duration(path: Path) -> float:
     return float(out.strip())
 
 
-def to_whisper(src: Path, out: Path) -> None:
+def to_whisper(src: Path, out: Path, duration: float | None = None,
+               on_progress: Callable[[float], None] | None = None) -> None:
     """WAV mono 16 kHz de tout le culte, lu par morceaux pour la transcription."""
     run(["ffmpeg", "-y", "-hide_banner", "-i", str(src), "-vn", "-ac", "1", "-ar", str(SR_WHISPER),
-         "-c:a", "pcm_s16le", str(out)])
+         "-c:a", "pcm_s16le", str(out)], duration, on_progress)
 
 
 # Chaîne d'amélioration de la voix (100 % CPU, rapide) :
@@ -41,20 +60,22 @@ ENHANCE_FILTER = ",".join([
 ])
 
 
-def extract_enhanced(src: Path, start: float, end: float, out: Path, out_whisper: Path) -> None:
+def extract_enhanced(src: Path, start: float, end: float, out: Path, out_whisper: Path,
+                     on_progress: Callable[[float], None] | None = None) -> None:
     """Découpe la prédication et l'améliore en un seul passage ffmpeg.
     Produit le WAV de travail (24 kHz) et sa copie 16 kHz pour Whisper."""
     graph = f"[0:a]{ENHANCE_FILTER},asplit=2[a][b];[b]aresample={SR_WHISPER}[c]"
     run(["ffmpeg", "-y", "-hide_banner", "-ss", f"{start:.3f}", "-i", str(src),
          "-t", f"{max(end - start, 1):.3f}", "-vn", "-filter_complex", graph,
          "-map", "[a]", "-c:a", "pcm_s16le", str(out),
-         "-map", "[c]", "-c:a", "pcm_s16le", str(out_whisper)])
+         "-map", "[c]", "-c:a", "pcm_s16le", str(out_whisper)], max(end - start, 1), on_progress)
 
 
 LOUDNORM = "loudnorm=I=-16:TP=-1.5:LRA=11"  # standard podcast
 
 
-def finalize(body: Path, out: Path, intro: Path | None = None, xfade: float = 0.6) -> None:
+def finalize(body: Path, out: Path, intro: Path | None = None, xfade: float = 0.6,
+             on_progress: Callable[[float], None] | None = None) -> None:
     """Normalise le volume (-16 LUFS) et ajoute l'intro avec un fondu enchaîné."""
     norm = f"aresample={SR},aformat=channel_layouts=mono,{LOUDNORM},aresample={SR}"
     if intro:
@@ -64,7 +85,8 @@ def finalize(body: Path, out: Path, intro: Path | None = None, xfade: float = 0.
                "-filter_complex", fc, "-map", "[out]"]
     else:
         cmd = ["ffmpeg", "-y", "-hide_banner", "-i", str(body), "-af", norm]
-    run(cmd + ["-ac", "1", "-ar", str(SR), "-c:a", "pcm_s16le", str(out)])
+    total = probe_duration(body) + (probe_duration(intro) - xfade if intro else 0)
+    run(cmd + ["-ac", "1", "-ar", str(SR), "-c:a", "pcm_s16le", str(out)], total, on_progress)
 
 
 def _meta(title: str, artist: str, date: str) -> list[str]:
@@ -74,15 +96,18 @@ def _meta(title: str, artist: str, date: str) -> list[str]:
     return args
 
 
-def encode_opus(src: Path, out: Path, bitrate: str, title: str, artist: str, date: str) -> None:
+def encode_opus(src: Path, out: Path, bitrate: str, title: str, artist: str, date: str,
+                duration: float | None = None, on_progress: Callable[[float], None] | None = None) -> None:
     """Opus mono : la meilleure qualité vocale pour la plus petite taille."""
     run(["ffmpeg", "-y", "-hide_banner", "-i", str(src), "-c:a", "libopus",
          "-b:a", bitrate, "-vbr", "on", "-compression_level", "10",
-         "-ac", "1", "-ar", "48000", *_meta(title, artist, date), str(out)])
+         "-ac", "1", "-ar", "48000", *_meta(title, artist, date), str(out)],
+        duration, on_progress)
 
 
-def encode_mp3(src: Path, out: Path, bitrate: str, title: str, artist: str, date: str) -> None:
+def encode_mp3(src: Path, out: Path, bitrate: str, title: str, artist: str, date: str,
+               duration: float | None = None, on_progress: Callable[[float], None] | None = None) -> None:
     """MP3 mono de secours, lisible partout."""
     run(["ffmpeg", "-y", "-hide_banner", "-i", str(src), "-c:a", "libmp3lame",
          "-b:a", bitrate, "-ac", "1", "-ar", "22050",
-         *_meta(title, artist, date), str(out)])
+         *_meta(title, artist, date), str(out)], duration, on_progress)

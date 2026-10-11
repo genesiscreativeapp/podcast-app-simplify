@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from . import config, storage
 from .db import Folder, Job, SessionLocal, init_db
+from .pipeline import steps
 from .utils import fmt_time, parse_time, slugify
 
 STATIC = Path(__file__).parent / "static"
@@ -50,8 +51,18 @@ def folder_dict(f: Folder) -> dict:
     return {"id": f.id, "name": f.name, "parent_id": f.parent_id, "has_intro": bool(f.intro_path)}
 
 
+def job_steps(j: Job) -> list[dict]:
+    skipped = set()
+    if j.start_override is not None or j.end_override is not None:
+        skipped.add("detect")  # bornes saisies : pas de repérage
+    if not (j.r2_key_ogg if j.status == "done" else storage.enabled()):
+        skipped.add("upload")
+    return steps.view(j.progress or 0.0, j.status, skipped)
+
+
 def job_dict(j: Job, with_log: bool = False) -> dict:
     d = {
+        "steps": job_steps(j),
         "id": j.id, "folder_id": j.folder_id, "youtube_url": j.youtube_url,
         "title": j.title, "date": j.date, "filename": j.filename,
         "status": j.status, "step": j.step, "progress": round(j.progress or 0, 3),

@@ -1,5 +1,6 @@
 """Orchestration complète d'un traitement, du lien YouTube au podcast sur R2."""
 import shutil
+import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -9,7 +10,7 @@ from pathlib import Path
 from .. import config, storage
 from ..db import Folder, Job, SessionLocal, folder_path, resolve_intro
 from ..utils import fmt_time
-from . import audio
+from . import audio, steps
 from .detect import detect_sermon
 from .download import download
 from .edit import edit_file
@@ -41,17 +42,21 @@ class Reporter:
                 job.log = (job.log or "") + line
                 s.commit()
 
-    def step(self, name: str, progress: float):
-        self.log(name)
-        self._update(step=name, progress=progress)
+    def step(self, key: str):
+        """Démarre une étape : la barre globale se place au début de sa part."""
+        label, lo, _hi = steps.BY_KEY[key]
+        self.log(label)
+        self._update(step=label, progress=lo)
 
-    def sub(self, lo: float, hi: float):
-        """Callback de progression pour une sous-étape (limité à 1 écriture / 2 s)."""
+    def sub(self, key: str, a: float = 0.0, b: float = 1.0):
+        """Callback de progression (0 → 1) pour la tranche [a, b] d'une étape (1 écriture / seconde)."""
+        _label, lo, hi = steps.BY_KEY[key]
+
         def cb(frac: float):
             now = time.monotonic()
-            if now - self._last > 2:
+            if now - self._last > 1:
                 self._last = now
-                self._update(progress=lo + (hi - lo) * frac)
+                self._update(progress=lo + (hi - lo) * (a + (b - a) * min(max(frac, 0.0), 1.0)))
         return cb
 
 
@@ -80,10 +85,10 @@ def run_job(job_id: int) -> None:
             cache.touch()  # le garde parmi les plus récents lors du nettoyage du cache
             rep.log("Audio YouTube déjà en cache, téléchargement évité")
         else:
-            rep.step("Téléchargement depuis YouTube", 0.01)
+            rep.step("download")
             shutil.rmtree(cache, ignore_errors=True)
             cache.mkdir(parents=True)
-            src, video_title = download(url, cache, rep.sub(0.01, 0.10))
+            src, video_title = download(url, cache, rep.sub("download"))
             (cache / "ok").touch()
         duration = audio.probe_duration(src)
         rep._update(video_title=video_title, duration_source=duration)
@@ -95,11 +100,11 @@ def run_job(job_id: int) -> None:
             end = min(end_ov or duration, duration)
             note = "Bornes saisies manuellement"
         else:
-            rep.step(f"Repérage de la prédication (modèle {config.WHISPER_MODEL_DETECT}, "
-                     f"{config.WHISPER_WORKERS} en parallèle)", 0.10)
+            rep.step("detect")
+            rep.log(f"Modèle {config.WHISPER_MODEL_DETECT}, {config.WHISPER_WORKERS} transcription(s) en parallèle")
             wav16 = work / "full16k.wav"
-            audio.to_whisper(src, wav16)
-            segs = transcribe_sampled(wav16, duration, rep.sub(0.12, 0.40))
+            audio.to_whisper(src, wav16, duration, rep.sub("detect", 0.0, 0.1))
+            segs = transcribe_sampled(wav16, duration, rep.sub("detect", 0.1, 1.0))
             wav16.unlink(missing_ok=True)
             start, end, note = detect_sermon(segs, duration, video_title or title, rep.log)
         if end - start < 30:
@@ -108,19 +113,20 @@ def run_job(job_id: int) -> None:
         rep.log(f"Prédication : {fmt_time(start)} → {fmt_time(end)} — {note}")
 
         # 3b. Extraction + amélioration de la voix (un seul passage ffmpeg)
-        rep.step("Extraction et amélioration de la voix", 0.41)
+        rep.step("voice")
         clean = work / "clean.wav"
         clean16 = work / "clean16k.wav"
-        audio.extract_enhanced(src, start, end, clean, clean16)
+        audio.extract_enhanced(src, start, end, clean, clean16, rep.sub("voice"))
 
         # 3c. Transcription fine mot à mot (sur la prédication uniquement, lots en parallèle)
-        rep.step(f"Transcription mot à mot (modèle {config.WHISPER_MODEL_EDIT})", 0.45)
-        segs = transcribe_words(clean16, end - start, rep.sub(0.45, 0.85))
+        rep.step("words")
+        rep.log(f"Modèle {config.WHISPER_MODEL_EDIT}, {config.WHISPER_WORKERS} transcription(s) en parallèle")
+        segs = transcribe_words(clean16, end - start, rep.sub("words"))
         clean16.unlink(missing_ok=True)
         words = [w for s in segs for w in s["words"]]
 
         # 3d. Montage : silences, « euh », répétitions
-        rep.step("Nettoyage : silences, hésitations, répétitions", 0.86)
+        rep.step("edit")
         edited = work / "edited.wav"
         stats = edit_file(clean, edited, words, config.MAX_PAUSE, config.TARGET_PAUSE,
                           config.REMOVE_FILLERS, config.REMOVE_REPEATS)
@@ -128,25 +134,35 @@ def run_job(job_id: int) -> None:
                 f"{stats['repeats']} répétitions retirées : {fmt_time(stats['before'])} → {fmt_time(stats['after'])}")
 
         # 4. Intro + normalisation du volume
-        rep.step("Ajout de l'intro et normalisation du volume", 0.90)
+        rep.step("master")
         master = work / "master.wav"
         intro_path = Path(intro) if intro and Path(intro).exists() else None
         if not intro_path:
             rep.log("Aucune intro configurée : podcast sans intro")
-        audio.finalize(edited, master, intro_path)
+        audio.finalize(edited, master, intro_path, on_progress=rep.sub("master"))
 
         # 6. Compression
-        rep.step("Compression pour WhatsApp / Telegram", 0.94)
+        rep.step("encode")
         out_dir = config.OUTPUT_DIR / str(job_id)
         out_dir.mkdir(parents=True, exist_ok=True)
         ogg = out_dir / f"{filename}.ogg"
         mp3 = out_dir / f"{filename}.mp3" if config.MAKE_MP3 else None
+        total = audio.probe_duration(master)
+        done = {"ogg": 0.0, "mp3": 0.0}
+        encode_cb = rep.sub("encode")
+
+        def part(name):  # avancement moyen des encodages menés ensemble
+            def cb(frac):
+                done[name] = frac
+                encode_cb(sum(done.values()) / (2 if mp3 else 1))
+            return cb
+
         with ThreadPoolExecutor(2) as ex:  # ffmpeg est mono-thread par encodage : on les lance ensemble
             jobs = [ex.submit(audio.encode_opus, master, ogg, config.OPUS_BITRATE,
-                              title, config.PODCAST_ARTIST, date)]
+                              title, config.PODCAST_ARTIST, date, total, part("ogg"))]
             if mp3:
                 jobs.append(ex.submit(audio.encode_mp3, master, mp3, config.MP3_BITRATE,
-                                      title, config.PODCAST_ARTIST, date))
+                                      title, config.PODCAST_ARTIST, date, total, part("mp3")))
             for j in jobs:
                 j.result()
         out_duration = audio.probe_duration(ogg)
@@ -157,13 +173,21 @@ def run_job(job_id: int) -> None:
 
         # 5. Envoi vers R2
         if storage.enabled():
-            rep.step("Envoi vers Cloudflare R2", 0.97)
+            rep.step("upload")
             key_ogg = storage.build_key(names, ogg.name)
             key_mp3 = storage.build_key(names, mp3.name) if mp3 else None
+            size_total = ogg.stat().st_size + (mp3.stat().st_size if mp3 else 0)
+            sent, lock, upload_cb = [0], threading.Lock(), rep.sub("upload")
+
+            def on_bytes(n):
+                with lock:
+                    sent[0] += n
+                    upload_cb(sent[0] / max(size_total, 1))
+
             with ThreadPoolExecutor(2) as ex:
-                ups = [ex.submit(storage.upload, ogg, key_ogg, "audio/ogg")]
+                ups = [ex.submit(storage.upload, ogg, key_ogg, "audio/ogg", on_bytes)]
                 if mp3:
-                    ups.append(ex.submit(storage.upload, mp3, key_mp3, "audio/mpeg"))
+                    ups.append(ex.submit(storage.upload, mp3, key_mp3, "audio/mpeg", on_bytes))
                 for u in ups:
                     u.result()
             rep._update(r2_key_ogg=key_ogg, r2_key_mp3=key_mp3)

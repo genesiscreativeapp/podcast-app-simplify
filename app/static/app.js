@@ -201,7 +201,21 @@ async function loadJobs() {
   state.jobs = jobs;
   renderJobs();
   clearTimeout(state.timer);
-  if (jobs.some((j) => j.status === "pending" || j.status === "running")) state.timer = setTimeout(() => { loadJobs(); loadStatus(); }, 4000);
+  if (jobs.some((j) => j.status === "pending" || j.status === "running")) state.timer = setTimeout(() => { loadJobs(); loadStatus(); }, 2500);
+}
+
+const STEP_ICON = { done: "✓", active: "●", pending: "○", skipped: "–", error: "!" };
+function renderSteps(j) {
+  const rows = j.steps.map((s, i) => `
+    <li class="st ${s.state}">
+      <span class="st-icon">${STEP_ICON[s.state]}</span>
+      <span class="st-name">${i + 1}. ${esc(s.label)}</span>
+      <span class="st-bar"><i style="width:${s.pct}%"></i></span>
+      <span class="st-pct">${s.state === "skipped" ? "ignorée" : s.pct + "%"}</span>
+    </li>`).join("");
+  return j.status === "done"
+    ? `<details class="steps"><summary>Détail des étapes</summary><ul>${rows}</ul></details>`
+    : `<ul class="steps">${rows}</ul>`;
 }
 
 const LABELS = { pending: "En attente", running: "En cours", done: "Terminé", error: "Erreur" };
@@ -231,7 +245,8 @@ function renderJobs() {
       </div>
       ${j.status === "pending" || j.status === "running" ? `
         <div class="progress"><div style="width:${pct}%"></div></div>
-        <div class="step">${esc(j.step)} — ${pct}%</div>` : ""}
+        <div class="step"><b>Global ${pct}%</b> — ${esc(j.step)}</div>` : ""}
+      ${renderSteps(j)}
       ${stats.length ? `<div class="stats">${stats.map((s) => `<span>${s}</span>`).join("")}</div>` : ""}
       ${j.detection_note && j.status === "done" ? `<div class="hint">${esc(j.detection_note)}</div>` : ""}
       ${j.error ? `<div class="err-box">${esc(j.error)}</div>` : ""}

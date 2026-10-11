@@ -127,3 +127,23 @@ dialog::backdrop { background: rgba(10, 8, 20, .55); }
   .job-form { grid-template-columns: 1fr; }
   .status .pill:not(.queue) { display: none; }
 }
+
+/* Étapes d'un traitement */
+ul.steps, .steps ul { list-style: none; margin: 8px 0 4px; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+details.steps { margin: 8px 0; font-size: 13px; color: var(--muted); }
+details.steps summary { cursor: pointer; }
+.st { display: grid; grid-template-columns: 18px minmax(120px, 1.4fr) minmax(80px, 2fr) 56px; align-items: center; gap: 8px; font-size: 13px; }
+.st-icon { text-align: center; font-weight: 700; color: var(--muted); }
+.st-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.st-bar { height: 6px; background: var(--bg); border-radius: 99px; overflow: hidden; }
+.st-bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .6s ease; }
+.st-pct { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+.st.done .st-icon { color: #16a34a; }
+.st.done .st-bar i { background: #16a34a; }
+.st.active .st-name, .st.active .st-pct { color: inherit; font-weight: 600; }
+.st.active .st-icon { color: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+.st.error .st-icon, .st.error .st-name, .st.error .st-pct { color: #dc2626; font-weight: 600; }
+.st.error .st-bar i { background: #dc2626; }
+.st.skipped { opacity: .5; }
+@keyframes pulse { 50% { opacity: .3; } }
+@media (max-width: 600px) { .st { grid-template-columns: 18px 1fr 48px; } .st-bar { grid-column: 2 / 4; grid-row: 2; } }
