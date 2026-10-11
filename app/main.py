@@ -719,9 +719,20 @@ async def http_error(_, exc: HTTPException):
 
 
 # --- Interface ----------------------------------------------------------------------
+NO_CACHE = {"Cache-Control": "no-cache"}
+
+
 @app.get("/")
 def index():
-    return FileResponse(STATIC / "index.html")
+    return FileResponse(STATIC / "index.html", headers=NO_CACHE)
 
 
-app.mount("/static", StaticFiles(directory=STATIC), name="static")
+class RevalidatedStatic(StaticFiles):
+    """JS/CSS revalidés à chaque chargement (ETag) : un navigateur ne garde pas un vieux app.js après un déploiement."""
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+
+app.mount("/static", RevalidatedStatic(directory=STATIC), name="static")
