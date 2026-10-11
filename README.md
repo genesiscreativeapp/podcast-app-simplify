@@ -15,8 +15,8 @@ mkdir -p data
 docker compose up -d --build
 ```
 
-L'interface est accessible sur `http://<serveur>:8000` (identifiants : `APP_USER` / `APP_PASSWORD`).
-Sur Coolify, déployez en « Docker Compose » et routez le domaine vers le service `web` (port 8000).
+L'interface écoute sur le port **3000** du conteneur `web` (identifiants : `APP_USER` / `APP_PASSWORD`). Le port n'est pas publié sur l'hôte : en local, ajoutez `ports: ["3000:3000"]` au service `web` pour ouvrir `http://localhost:3000`.
+Sur Coolify, déployez en « Docker Compose » et routez le domaine vers le service `web`, avec le port : `https://votre-domaine:3000`.
 
 Au premier traitement, les modèles Whisper sont téléchargés dans `data/models` (≈ 150 Mo pour `base`, ≈ 500 Mo pour `small`).
 
