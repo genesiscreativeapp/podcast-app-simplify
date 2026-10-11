@@ -19,6 +19,7 @@ PERMISSIONS = {
     "jobs.view": "Voir les traitements et télécharger les podcasts",
     "jobs.create": "Lancer et relancer des traitements",
     "jobs.delete": "Supprimer des traitements",
+    "jobs.trim": "Rogner les podcasts terminés (début et fin)",
     "folders.manage": "Créer, renommer et supprimer des dossiers",
     "intros.manage": "Gérer la bibliothèque d'intros",
     "settings.manage": "Régler le nombre de traitements en parallèle",
@@ -109,7 +110,7 @@ def user_perms(user: User) -> list[str]:
 
 def user_dict(user: User) -> dict:
     return {"id": user.id, "username": user.username, "display_name": user.display_name,
-            "is_admin": user.is_admin, "is_active": user.is_active, "permissions": user_perms(user),
+            "is_admin": user.is_admin, "is_active": user.is_active, "is_system": user.is_system, "permissions": user_perms(user),
             "created_at": user.created_at.isoformat() if user.created_at else None,
             "last_login": user.last_login.isoformat() if user.last_login else None}
 
@@ -130,18 +131,26 @@ def need(perm: str):
 
 
 # --- Premier démarrage ------------------------------------------------------------------------
+SYSTEM_MSG = "Le compte administrateur système est protégé : il ne peut pas être modifié, désactivé ni supprimé."
+
+
 def bootstrap_admin() -> None:
-    """Crée le compte administrateur initial s'il n'existe aucun compte."""
+    """Crée le compte administrateur système s'il n'existe aucun compte, et marque ce compte comme protégé.
+    Sur une base existante sans compte système, c'est l'administrateur APP_USER (sinon le plus ancien) qui le devient."""
     with SessionLocal() as s:
-        if s.query(User).count():
-            return
-        password = config.APP_PASSWORD
-        if not password:
-            password = secrets.token_urlsafe(12)
-            log.warning("APP_PASSWORD vide : mot de passe généré pour « %s » : %s", config.APP_USER, password)
-        s.add(User(username=config.APP_USER, display_name="Administrateur", is_admin=True,
-                   password_hash=hash_password(password)))
         try:
+            if not s.query(User).count():
+                password = config.APP_PASSWORD
+                if not password:
+                    password = secrets.token_urlsafe(12)
+                    log.warning("APP_PASSWORD vide : mot de passe généré pour « %s » : %s", config.APP_USER, password)
+                s.add(User(username=config.APP_USER, display_name="Administrateur", is_admin=True, is_system=True,
+                           password_hash=hash_password(password)))
+            elif not s.query(User).filter(User.is_system).count():
+                admins = s.query(User).filter(User.is_admin).order_by(User.id).all()
+                chosen = next((u for u in admins if u.username == config.APP_USER.lower()), admins[0] if admins else None)
+                if chosen:
+                    chosen.is_system = True
             s.commit()
-        except Exception:  # web et worker démarrent ensemble : l'autre l'a créé
+        except Exception:  # web et worker démarrent ensemble : l'autre l'a déjà fait
             s.rollback()

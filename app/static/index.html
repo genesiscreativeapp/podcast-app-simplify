@@ -49,19 +49,11 @@
       <aside class="sidebar" id="sidebar">
         <nav class="nav">
           <button class="nav-link" data-nav="home"><span data-ic="home"></span> Accueil</button>
+          <button class="nav-link" data-nav="folders"><span data-ic="folder"></span> Dossiers</button>
           <button class="nav-link" data-nav="history"><span data-ic="history"></span> Historique</button>
+          <button class="nav-link" data-nav="intros"><span data-ic="music"></span> Intros</button>
           <button class="nav-link" data-nav="users" id="navUsers" hidden><span data-ic="users"></span> Utilisateurs</button>
         </nav>
-        <div class="side-head">
-          <span>Dossiers</span>
-          <button class="btn small" id="newRootBtn" hidden><span data-ic="plus"></span> Dossier</button>
-        </div>
-        <nav id="tree" class="tree"></nav>
-        <div class="side-foot">
-          <div class="label">Intro par défaut</div>
-          <div id="defaultIntro" class="muted">—</div>
-          <button class="btn small ghost" id="introsBtn"><span data-ic="music"></span> Bibliothèque d'intros</button>
-        </div>
       </aside>
 
       <main class="main" id="main">
@@ -109,6 +101,22 @@
             <button class="btn ghost more" id="histMore" hidden>Afficher plus</button>
           </section>
 
+          <!-- Intros -->
+          <section id="introsView" hidden>
+            <div class="page-head"><h1>Intros</h1></div>
+            <p class="hint">Bibliothèque d'intros (fichiers MP3). Chaque traitement peut en utiliser une ; sans choix, on prend l'intro du dossier, sinon l'intro par défaut (★).</p>
+            <div id="introList" class="jobs"></div>
+            <form id="introForm" class="card intro-add">
+              <h3>Ajouter une intro</h3>
+              <div class="row">
+                <label>Nom <input name="name" placeholder="Intro Culte Royal"></label>
+                <label>Fichier MP3 <input name="file" type="file" accept=".mp3,audio/mpeg" required></label>
+              </div>
+              <label class="check"><input type="checkbox" name="is_default"> Utiliser comme intro par défaut</label>
+              <div class="dialog-foot"><button class="btn" type="submit"><span data-ic="plus"></span> Ajouter</button></div>
+            </form>
+          </section>
+
           <!-- Utilisateurs -->
           <section id="usersView" hidden>
             <div class="page-head">
@@ -119,22 +127,25 @@
             <div id="usersList" class="jobs"></div>
           </section>
 
-          <!-- Dossier -->
-          <section id="folderView" hidden>
-            <div class="crumbs" id="crumbs"></div>
-            <div class="page-head">
-              <h1 id="folderTitle"></h1>
-              <div class="actions" id="folderActions">
-                <button class="btn ghost small" id="subfolderBtn"><span data-ic="plus"></span> Sous-dossier</button>
-                <button class="btn ghost small" id="renameBtn">Renommer</button>
-                <button class="btn ghost small danger" id="deleteFolderBtn">Supprimer</button>
+          <!-- Dossiers : explorateur de fichiers -->
+          <section id="foldersView" hidden>
+            <div class="explorer-bar">
+              <button class="icon-btn" id="foldUp" title="Dossier parent" aria-label="Dossier parent"><span data-ic="up"></span></button>
+              <nav class="pathbar" id="pathbar" aria-label="Chemin"></nav>
+              <input id="foldSearch" type="search" placeholder="Rechercher dans ce dossier…" class="search">
+              <div class="view-toggle" role="group" aria-label="Affichage">
+                <button data-fview="grid" title="Icônes"><span data-ic="grid"></span></button>
+                <button data-fview="list" title="Liste"><span data-ic="list"></span></button>
               </div>
             </div>
+            <div class="explorer-actions" id="foldActions">
+              <button class="btn" id="newFolderBtn"><span data-ic="plus"></span> Nouveau dossier</button>
+              <button class="btn" id="newJobBtn"><span data-ic="plus"></span> Nouveau traitement</button>
+            </div>
 
-            <div class="subfolders" id="subfolders"></div>
-
-            <div class="card" id="jobFormCard">
-              <h3>Nouveau traitement</h3>
+            <div class="card" id="newJobPanel" hidden>
+              <div class="panel-head"><h3>Nouveau traitement dans <span id="newJobWhere"></span></h3>
+                <button class="icon-btn" id="newJobClose" aria-label="Fermer">✕</button></div>
               <form id="jobForm" class="job-form">
                 <label class="full">Lien YouTube
                   <input name="youtube_url" type="url" required placeholder="https://www.youtube.com/watch?v=…">
@@ -156,11 +167,25 @@
                   </div>
                   <p class="hint">Laisser vide pour une détection automatique. Renseigner ces champs évite l'étape de repérage (plus rapide).</p>
                 </details>
-                <details class="full">
-                  <summary>Ajouter plusieurs liens d'un coup</summary>
-                  <textarea id="batchText" rows="5" placeholder="https://youtube.com/watch?v=… | La foi qui déplace les montagnes | 2026-10-11&#10;https://youtube.com/watch?v=… | Le pouvoir de la prière"></textarea>
-                  <p class="hint">Une ligne par traitement : <b>lien | nom | date</b> (date facultative : celle du formulaire est utilisée). Ils sont traités dans l'ordre, selon le nombre de traitements en parallèle. Les lignes en erreur restent dans la zone.</p>
-                  <button class="btn small" type="button" id="batchBtn">Ajouter tout à la file</button>
+                <details class="full" id="batchBox">
+                  <summary>Ajouter plusieurs liens d'un coup <span class="count" id="batchCount"></span></summary>
+                  <div class="batch">
+                    <p class="hint">Préparez votre liste, modifiez ou retirez des lignes, puis lancez le tout : les traitements partent dans la file d'attente, avec l'intro choisie plus haut. La liste est conservée si vous quittez la page.</p>
+                    <div class="batch-add">
+                      <input id="batchUrl" type="url" placeholder="Lien YouTube" autocomplete="off">
+                      <input id="batchTitle" placeholder="Nom du podcast" autocomplete="off">
+                      <input id="batchDate" type="date">
+                      <button class="btn" type="button" id="batchAddBtn"><span data-ic="plus"></span> Ajouter</button>
+                    </div>
+                    <div id="batchList" class="batch-list"></div>
+                    <div class="batch-foot">
+                      <div class="actions">
+                        <button class="btn small ghost" type="button" id="batchPasteBtn"><span data-ic="list"></span> Coller une liste</button>
+                        <button class="btn small ghost danger" type="button" id="batchClearBtn"><span data-ic="trash"></span> Tout vider</button>
+                      </div>
+                      <button class="btn" type="button" id="batchRunBtn"><span data-ic="play"></span> <span id="batchRunLabel">Lancer</span></button>
+                    </div>
+                  </div>
                 </details>
                 <div class="full form-foot">
                   <span class="hint" id="filenamePreview"></span>
@@ -169,19 +194,8 @@
               </form>
             </div>
 
-            <div class="card">
-              <div class="intro-row">
-                <div>
-                  <h3>Intro de ce dossier</h3>
-                  <div class="muted" id="folderIntroNote"></div>
-                </div>
-                <select id="folderIntroSelect"></select>
-              </div>
-              <div id="folderIntroPlayer"></div>
-            </div>
-
-            <h3 class="section-title">Traitements</h3>
-            <div id="jobs" class="jobs"></div>
+            <div class="explorer" id="explorer" tabindex="0"></div>
+            <div class="statusbar" id="foldStatus"></div>
           </section>
         </div>
       </main>
@@ -197,25 +211,7 @@
     <div id="detailBody"></div>
   </dialog>
 
-  <!-- Bibliothèque d'intros -->
-  <dialog id="introDialog" class="wide">
-    <div class="dialog-head">
-      <h3>Bibliothèque d'intros (MP3)</h3>
-      <button class="icon-btn" id="introClose" aria-label="Fermer">✕</button>
-    </div>
-    <p class="hint">Chaque traitement peut utiliser l'une de ces intros. Sans choix, on prend l'intro du dossier, sinon l'intro par défaut.</p>
-    <div id="introList"></div>
-    <form id="introForm" class="intro-add">
-      <div class="d-title">Ajouter une intro</div>
-      <div class="row">
-        <label>Nom <input name="name" placeholder="Intro Culte Royal"></label>
-        <label>Fichier MP3 <input name="file" type="file" accept=".mp3,audio/mpeg" required></label>
-      </div>
-      <label class="check"><input type="checkbox" name="is_default"> Utiliser comme intro par défaut</label>
-      <div class="dialog-foot"><button class="btn" type="submit">Ajouter</button></div>
-    </form>
-  </dialog>
-
+  <div id="ctxMenu" class="ctx" hidden></div>
   <div id="toasts" class="toasts"></div>
   <script src="/static/app.js"></script>
 </body>

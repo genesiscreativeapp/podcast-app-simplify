@@ -22,16 +22,23 @@ Au premier traitement, les modèles Whisper sont téléchargés dans `data/model
 
 ## Utilisation
 
-1. Créer un dossier (ex. **CULTE ROYAL**), éventuellement des sous-dossiers.
-2. Ajouter vos **intros** (fichiers **MP3**) dans la bibliothèque (**🎵 Gérer les intros**, barre latérale). La première devient l'intro par défaut ; on peut en changer à tout moment. Chaque dossier peut avoir la sienne (un sous-dossier hérite de son parent), et chaque traitement peut en choisir une autre, ou aucune, dans le formulaire.
-3. Coller le lien YouTube, le nom et la date, puis **Lancer le traitement** — ou **Ajouter plusieurs liens d'un coup** (une ligne `lien | nom | date` par traitement).
+1. Menu **Dossiers** : la page se présente comme un explorateur de fichiers. Créez un dossier (ex. **CULTE ROYAL**) et des sous-dossiers ; double-clic pour ouvrir, fil d'Ariane et bouton ↑ pour remonter, vue icônes ou liste, recherche dans le dossier.
+   - **Clic droit** sur un élément : ouvrir, renommer, déplacer, intro du dossier, supprimer, télécharger, rogner, relancer…
+   - **Glisser-déposer** un dossier ou un podcast sur un dossier (ou sur un segment du fil d'Ariane) pour le déplacer ; « Déplacer vers… » fait la même chose sans souris.
+   - Raccourcis : Entrée (ouvrir), F2 (renommer), Suppr (supprimer), Retour arrière (dossier parent).
+2. Ajouter vos **intros** (fichiers **MP3**) dans la bibliothèque (menu **Intros**, dans la barre latérale). La première devient l'intro par défaut ; on peut en changer à tout moment. Chaque dossier peut avoir la sienne (un sous-dossier hérite de son parent), et chaque traitement peut en choisir une autre, ou aucune, dans le formulaire.
+3. Coller le lien YouTube, le nom et la date, puis **Lancer le traitement** — ou **Ajouter plusieurs liens d'un coup** : on prépare une liste (ajouter, modifier avec début/fin facultatifs, retirer, ou coller plusieurs lignes `lien | nom | date`), puis **Lancer** envoie tout dans la file.
 4. Suivre l'avancement en direct, écouter le résultat, télécharger le MP3 ou copier le lien R2.
 5. Si la prédication détectée n'est pas la bonne : **Relancer** en saisissant le début et la fin (format `1:05:30`).
+
+## Rogner un podcast terminé
+
+Bouton **Rogner** sur un podcast terminé : on écoute, on place le curseur et « Marquer ici » fixe le début ou la fin conservés (ou on saisit `h:mm:ss`). Le rognage **ne réencode pas** (aucune perte de qualité, précision d'environ 26 ms). L'original est gardé : **Restaurer l'original** revient en arrière. Sur R2, le fichier est remplacé par un nouveau (le lien de partage change, pour qu'aucune copie en cache de l'ancien ne soit servie). Permission `jobs.trim`.
 
 ## Connexion, utilisateurs et permissions
 
 - Écran de connexion avec session (cookie `HttpOnly`) ; 5 échecs en 5 minutes bloquent les essais pendant quelques minutes.
-- **Utilisateurs** (administrateur) : créer des comptes, les activer/désactiver, réinitialiser un mot de passe et choisir les fonctions autorisées : voir et télécharger, lancer/relancer, supprimer, gérer les dossiers, gérer les intros, régler le parallélisme. L'administrateur a tous les droits et seul gère les comptes. Chaque utilisateur peut changer son mot de passe (menu en haut à droite).
+- **Utilisateurs** (administrateur) : le compte administrateur système (créé au démarrage) est protégé, on ne peut ni le modifier, ni le désactiver, ni le supprimer ; créer des comptes, les activer/désactiver, réinitialiser un mot de passe et choisir les fonctions autorisées : voir et télécharger, lancer/relancer, supprimer, gérer les dossiers, gérer les intros, régler le parallélisme. L'administrateur a tous les droits et seul gère les comptes. Chaque utilisateur peut changer son mot de passe (menu en haut à droite).
 
 ## Historique, détails et liens directs
 

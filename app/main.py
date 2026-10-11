@@ -9,7 +9,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 
 from . import auth, config, storage
 from .pipeline import audio
@@ -73,6 +73,8 @@ def job_dict(j: Job, with_log: bool = False, s=None) -> dict:
         "detection_note": j.detection_note,
         "duration_source": fmt_time(j.duration_source), "duration_output": fmt_time(j.duration_output),
         "has_mp3": bool(j.local_mp3 and Path(j.local_mp3).exists()),
+        "duration_output_s": j.duration_output,
+        "can_restore": bool(j.local_mp3 and (Path(j.local_mp3).parent / "original.mp3").exists()),
         "size_mp3": j.size_mp3,
         "on_r2": bool(j.r2_key_mp3),
         "created_at": j.created_at.isoformat() if j.created_at else None,
@@ -94,13 +96,15 @@ class FolderIn(BaseModel):
     parent_id: int | None = None
 
 
-class FolderRename(BaseModel):
-    name: str
+class FolderPatch(BaseModel):
+    name: str | None = None
+    parent_id: int | None = None  # déplacement : pris en compte seulement s'il est envoyé (null = racine)
 
 
 @app.get("/api/folders", dependencies=[Depends(auth.need("jobs.view"))])
 def list_folders(s=Depends(db)):
-    return [folder_dict(f) for f in s.query(Folder).order_by(Folder.name).all()]
+    counts = dict(s.query(Job.folder_id, func.count(Job.id)).group_by(Job.folder_id).all())
+    return [{**folder_dict(f), "job_count": counts.get(f.id, 0)} for f in s.query(Folder).order_by(Folder.name).all()]
 
 
 @app.post("/api/folders", dependencies=[Depends(auth.need("folders.manage"))])
@@ -117,11 +121,24 @@ def create_folder(body: FolderIn, s=Depends(db)):
 
 
 @app.patch("/api/folders/{folder_id}", dependencies=[Depends(auth.need("folders.manage"))])
-def rename_folder(folder_id: int, body: FolderRename, s=Depends(db)):
+def update_folder(folder_id: int, body: FolderPatch, s=Depends(db)):
+    """Renomme et/ou déplace un dossier."""
     f = s.get(Folder, folder_id) or _404("Dossier")
-    if not body.name.strip():
-        raise HTTPException(400, "Nom de dossier vide")
-    f.name = body.name.strip()
+    if body.name is not None:
+        if not body.name.strip():
+            raise HTTPException(400, "Nom de dossier vide")
+        f.name = body.name.strip()
+    if "parent_id" in body.model_fields_set:
+        if body.parent_id:
+            if not s.get(Folder, body.parent_id):
+                raise HTTPException(404, "Dossier de destination introuvable")
+            cur, seen = s.get(Folder, body.parent_id), set()
+            while cur is not None and cur.id not in seen:  # on ne peut pas déplacer un dossier dans lui-même
+                if cur.id == folder_id:
+                    raise HTTPException(400, "Impossible de déplacer un dossier dans lui-même ou l'un de ses sous-dossiers")
+                seen.add(cur.id)
+                cur = s.get(Folder, cur.parent_id) if cur.parent_id else None
+        f.parent_id = body.parent_id or None
     s.commit()
     return folder_dict(f)
 
@@ -329,6 +346,21 @@ def get_job(job_id: int, s=Depends(db)):
     return d
 
 
+class MoveIn(BaseModel):
+    folder_id: int
+
+
+@app.post("/api/jobs/{job_id}/move", dependencies=[Depends(auth.need("folders.manage"))])
+def move_job(job_id: int, body: MoveIn, s=Depends(db)):
+    """Déplace un traitement dans un autre dossier (les fichiers déjà envoyés sur R2 ne changent pas de nom)."""
+    job = s.get(Job, job_id) or _404("Traitement")
+    if not s.get(Folder, body.folder_id):
+        raise HTTPException(404, "Dossier de destination introuvable")
+    job.folder_id = body.folder_id
+    s.commit()
+    return job_dict(job, s=s)
+
+
 @app.post("/api/jobs/{job_id}/retry", dependencies=[Depends(auth.need("jobs.create"))])
 def retry_job(job_id: int, body: RetryIn, s=Depends(db)):
     job = s.get(Job, job_id) or _404("Traitement")
@@ -369,6 +401,83 @@ def job_file(job_id: int, fmt: str, download: bool = False, s=Depends(db)):
         raise HTTPException(404, "Fichier indisponible")
     return FileResponse(path, media_type="audio/mpeg",
                         filename=Path(path).name if download else None)
+
+
+class TrimIn(BaseModel):
+    start: str | None = None
+    end: str | None = None
+
+
+def _publish_new_audio(s, job: Job, new_file: Path) -> None:
+    """Remplace le MP3 d'un traitement terminé (disque, base et R2). R2 d'abord : en cas d'échec, rien ne change.
+    Le fichier R2 change de nom : une copie en cache (CDN, navigateur) de l'ancien ne peut pas être resservie."""
+    cur = Path(job.local_mp3)
+    old_key, new_key = job.r2_key_mp3, None
+    if old_key and storage.enabled():
+        folder = s.get(Folder, job.folder_id)
+        new_key = storage.build_key(folder_path(s, folder) if folder else [], f"{job.filename}-{secrets.token_hex(2)}.mp3")
+        try:
+            storage.upload(new_file, new_key, "audio/mpeg")
+        except Exception as exc:
+            new_file.unlink(missing_ok=True)
+            raise HTTPException(502, f"Envoi vers R2 impossible : {exc}")
+    new_file.replace(cur)
+    job.size_mp3 = cur.stat().st_size
+    job.duration_output = audio.probe_duration(cur)
+    if new_key:
+        job.r2_key_mp3 = new_key
+    s.commit()
+    if new_key and old_key:
+        try:
+            storage.delete([old_key])
+        except Exception:
+            pass  # l'ancien fichier reste orphelin sur R2 : sans gravité
+
+
+def _done_job(s, job_id: int) -> Job:
+    job = s.get(Job, job_id) or _404("Traitement")
+    if job.status != "done" or not job.local_mp3 or not Path(job.local_mp3).exists():
+        raise HTTPException(400, "Seul un podcast terminé peut être rogné")
+    return job
+
+
+@app.post("/api/jobs/{job_id}/trim", dependencies=[Depends(auth.need("jobs.trim"))])
+def trim_job(job_id: int, body: TrimIn, s=Depends(db)):
+    """Rogne le début et/ou la fin du podcast terminé, sans réencodage. L'original est gardé pour pouvoir revenir."""
+    job = _done_job(s, job_id)
+    start, end = _times(body.start, body.end)
+    cur = Path(job.local_mp3)
+    duration = audio.probe_duration(cur)
+    start, end = start or 0.0, min(end if end is not None else duration, duration)
+    if end - start < 1:
+        raise HTTPException(400, "Il doit rester au moins 1 seconde")
+    if start < 0.05 and end > duration - 0.05:
+        raise HTTPException(400, "Rien à rogner : début et fin sont ceux du podcast")
+    original = cur.with_name("original.mp3")
+    if not original.exists():
+        shutil.copy2(cur, original)
+    tmp = cur.with_name("trim.tmp.mp3")
+    try:
+        audio.trim_mp3(cur, tmp, start, end)
+    except Exception as exc:
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(500, f"Rognage impossible : {exc}")
+    _publish_new_audio(s, job, tmp)
+    return job_dict(job, s=s)
+
+
+@app.post("/api/jobs/{job_id}/trim/reset", dependencies=[Depends(auth.need("jobs.trim"))])
+def reset_trim(job_id: int, s=Depends(db)):
+    job = _done_job(s, job_id)
+    cur = Path(job.local_mp3)
+    original = cur.with_name("original.mp3")
+    if not original.exists():
+        raise HTTPException(400, "Aucun original à restaurer")
+    tmp = cur.with_name("restore.tmp.mp3")
+    shutil.copy2(original, tmp)
+    _publish_new_audio(s, job, tmp)
+    original.unlink(missing_ok=True)
+    return job_dict(job, s=s)
 
 
 @app.get("/api/jobs/{job_id}/link/{fmt}", dependencies=[Depends(auth.need("jobs.view"))])
@@ -514,6 +623,8 @@ def _other_active_admins(s, user_id: int) -> int:
 def update_user(user_id: int, body: UserPatch, request: Request, s=Depends(db),
                 _=Depends(auth.need("admin"))):
     user = s.get(User, user_id) or _404("Utilisateur")
+    if user.is_system:
+        raise HTTPException(403, auth.SYSTEM_MSG)
     me_id = request.state.user.id
     losing_admin = (body.is_admin is False and user.is_admin) or (body.is_active is False and user.is_admin)
     if losing_admin and not _other_active_admins(s, user_id):
@@ -541,6 +652,8 @@ def update_user(user_id: int, body: UserPatch, request: Request, s=Depends(db),
 @app.delete("/api/users/{user_id}")
 def delete_user(user_id: int, request: Request, s=Depends(db), _=Depends(auth.need("admin"))):
     user = s.get(User, user_id) or _404("Utilisateur")
+    if user.is_system:
+        raise HTTPException(403, auth.SYSTEM_MSG)
     if user_id == request.state.user.id:
         raise HTTPException(400, "Vous ne pouvez pas supprimer votre propre compte")
     if user.is_admin and not _other_active_admins(s, user_id):

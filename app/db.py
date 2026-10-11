@@ -38,6 +38,7 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(300))
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_system: Mapped[bool] = mapped_column(Boolean, default=False)  # compte administrateur système : protégé
     permissions: Mapped[str] = mapped_column(Text, default="")  # clés séparées par des virgules
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     last_login: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -141,7 +142,8 @@ def _init_db() -> None:
     # Bases créées avant la bibliothèque d'intros : ajoute les colonnes manquantes
     with engine.begin() as conn:
         for table, col, sql_type in (("jobs", "intro_id", "INTEGER"), ("folders", "intro_id", "INTEGER"),
-                                     ("jobs", "edit_note", "TEXT"), ("jobs", "created_by", "VARCHAR(60)")):
+                                     ("jobs", "edit_note", "TEXT"), ("jobs", "created_by", "VARCHAR(60)"),
+                                     ("users", "is_system", "BOOLEAN DEFAULT 0")):
             cols = {r[1] for r in conn.execute(text(f"PRAGMA table_info({table})"))}
             if col not in cols:
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {sql_type}"))

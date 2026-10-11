@@ -102,3 +102,9 @@ def encode_mp3(src: Path, out: Path, bitrate: str, title: str, artist: str, date
     run(["ffmpeg", "-y", "-hide_banner", "-i", str(src), "-c:a", "libmp3lame",
          "-b:a", bitrate, "-ac", "1", "-ar", str(SR), "-id3v2_version", "3",
          *_meta(title, artist, date), str(out)], duration, on_progress)
+
+
+def trim_mp3(src: Path, dst: Path, start: float, end: float) -> None:
+    """Garde [start, end] sans réencoder (aucune perte de qualité ; précision d'une trame MP3, ~26 ms)."""
+    run(["ffmpeg", "-y", "-hide_banner", "-ss", f"{start:.3f}", "-i", str(src), "-t", f"{end - start:.3f}",
+         "-c:a", "copy", "-map_metadata", "0", "-id3v2_version", "3", str(dst)])

@@ -174,6 +174,7 @@ def run_job(job_id: int) -> None:
         rep.step("encode")
         out_dir = config.OUTPUT_DIR / str(job_id)
         out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "original.mp3").unlink(missing_ok=True)  # copie d'avant un ancien rognage
         mp3 = out_dir / f"{filename}.mp3"
         audio.encode_mp3(master, mp3, config.MP3_BITRATE, title, config.PODCAST_ARTIST, date,
                          audio.probe_duration(master), rep.sub("encode"))

@@ -36,6 +36,15 @@ const ICONS = {
   logout: '<path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l5-5-5-5M15 12H3"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
+  up: '<path d="M12 19V5M5.5 11.5 12 5l6.5 6.5"/>',
+  grid: '<rect x="4" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.5"/>',
+  move: '<path d="M5 12h14M14 7l5 5-5 5"/>',
+  refresh: '<path d="M20 12a8 8 0 1 1-2.3-5.7L20 8.5"/><path d="M20 4v4.5h-4.5"/>',
+  open: '<path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
+  lock: '<rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
+  list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
+  edit: '<path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3zM13.5 6.5l3 3"/>',
+  scissors: '<circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.1 15.9M14.5 14.5 20 20M8.1 8.1 12 12"/>',
   mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>',
 };
 const ic = (n) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n] || ""}</svg>`;
@@ -191,7 +200,6 @@ async function startApp() {
   $("userName").textContent = name;
   $("userAvatar").textContent = name.slice(0, 1).toUpperCase();
   $("navUsers").hidden = !state.me.is_admin;
-  $("newRootBtn").hidden = !can("folders.manage");
   $("emptyNewBtn").hidden = !can("folders.manage");
   $("parallelBox").hidden = !can("settings.manage");
   $("introForm").hidden = !can("intros.manage");
@@ -203,24 +211,25 @@ async function startApp() {
 
 function route() {
   const h = location.hash.slice(1);
-  if (/^\d+$/.test(h) && byId(+h)) return go("folder", +h);
-  if (h === "history" || (h === "users" && state.me.is_admin)) return go(h);
+  if (/^\d+$/.test(h) && byId(+h)) return go("folders", +h);
+  if (h === "folders") return go("folders");
+  if (h === "history" || h === "intros" || (h === "users" && state.me.is_admin)) return go(h);
   return go("home");
 }
 
 async function go(view, id = null) {
   state.view = view;
-  state.current = view === "folder" ? id : null;
-  const hash = view === "folder" ? String(id) : view;
+  state.current = view === "folders" ? id : null;
+  const hash = view === "folders" ? (id ? String(id) : "folders") : view;
   if (location.hash.slice(1) !== hash) history.replaceState(null, "", "#" + hash);
-  for (const v of ["home", "history", "users", "folder"]) $(v + "View").hidden = v !== view;
+  for (const v of ["home", "folders", "history", "intros", "users"]) $(v + "View").hidden = v !== view;
   document.querySelectorAll(".nav-link").forEach((b) => b.classList.toggle("active", b.dataset.nav === view));
   $("sidebar").classList.remove("open");
-  renderTree();
   if (view === "home") await loadHome();
   else if (view === "history") await loadHistory();
+  else if (view === "intros") { renderIntroList(); await loadIntros(); }
   else if (view === "users") await loadUsers();
-  else if (view === "folder") { state.jobs = []; renderFolder(); await loadJobs(); }
+  else if (view === "folders") { state.jobs = []; state.sel = null; $("newJobPanel").hidden = true; $("foldSearch").value = ""; renderExplorer(); await loadJobs(); }
 }
 window.addEventListener("hashchange", () => { if (state.me) route(); });
 document.addEventListener("click", (e) => {
@@ -244,7 +253,7 @@ async function tick() {
 function refreshView() {
   if (state.view === "home") loadHome(true);
   else if (state.view === "history") loadHistory(false, true);
-  else if (state.view === "folder") loadJobs();
+  else if (state.view === "folders") { loadJobs(); loadFolders(); }
   if (state.detail && $("detailDialog").open) openDetail(state.detail.id, true);
 }
 
@@ -301,6 +310,7 @@ function jobActions(j, { detail = true, play = false } = {}) {
     ${j.has_mp3 ? `<a class="btn small" href="/api/jobs/${j.id}/file/mp3?download=true">${ic("download")} Télécharger MP3</a>` : ""}
     ${j.on_r2 ? `<button class="btn small ghost" data-act="link" data-id="${j.id}">${ic("link")} Copier le lien</button>` : ""}
     ${detail ? `<button class="btn small ghost" data-act="detail" data-id="${j.id}">${ic("info")} Détails</button>` : ""}
+    ${j.status === "done" && j.has_mp3 && can("jobs.trim") ? `<button class="btn small ghost" data-act="trim" data-id="${j.id}">${ic("scissors")} Rogner</button>` : ""}
     ${(j.status === "done" || j.status === "error") && can("jobs.create") ? `<button class="btn small ghost" data-act="retry" data-id="${j.id}">${ic("retry")} Relancer</button>` : ""}
     ${j.status !== "running" && can("jobs.delete") ? `<button class="btn small ghost danger" data-act="delete" data-id="${j.id}">${ic("trash")} Supprimer</button>` : ""}
   </div>`;
@@ -379,6 +389,7 @@ async function handleAction(act, id, btn) {
       const { url, public: pub } = await api(`/api/jobs/${id}/link/mp3`);
       await copyLink(url, pub ? "Lien public copié" : "Lien copié (valable 7 jours)");
     } else if (act === "retry") await retryDialog(job);
+    else if (act === "trim") await trimDialog(job);
     else if (act === "delete") {
       const ok = await confirmBox({ title: "Supprimer ce traitement ?",
         message: `« <b>${esc(job.title)}</b> » sera supprimé, ainsi que ses fichiers (y compris sur R2). Cette action est définitive.`,
@@ -412,6 +423,73 @@ async function retryDialog(job) {
     },
   });
   if (done) { toast("Traitement relancé", "ok"); refreshView(); loadStatus(); }
+}
+
+// ---------- Rognage du podcast terminé ----------
+const clock = (s) => { s = Math.max(0, s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+  return `${h}:${String(m).padStart(2, "0")}:${x.toFixed(1).padStart(4, "0")}`; };
+const parseClock = (v) => { const p = String(v).trim().split(":"); if (!v.trim() || p.length > 3 || p.some((x) => !/^\d+(\.\d+)?$/.test(x))) return NaN;
+  return p.reduce((a, x) => a * 60 + parseFloat(x), 0); };
+
+async function trimDialog(job) {
+  const dur = job.duration_output_s || 0;
+  const res = await modal({
+    title: "Rogner le podcast", wide: true,
+    body: `<p>Retirez le début et/ou la fin du podcast terminé (par exemple un silence, un chant ou une annonce en trop). Écoutez, placez le curseur au bon endroit, puis cliquez « Marquer ici ».</p>
+      <div class="trim-player"><audio controls preload="metadata" src="/api/jobs/${job.id}/file/mp3?v=${Date.now()}"></audio></div>
+      <div class="trim-marks">
+        <div class="mark"><b>Début conservé</b><input name="start" value="0:00:00.0" autocomplete="off">
+          <div class="actions"><button class="btn small ghost" type="button" data-mark="start">Marquer ici</button>
+          <button class="btn small ghost" type="button" data-prev="start">${ic("play")} Écouter le début</button></div></div>
+        <div class="mark"><b>Fin conservée</b><input name="end" value="${clock(dur)}" autocomplete="off">
+          <div class="actions"><button class="btn small ghost" type="button" data-mark="end">Marquer ici</button>
+          <button class="btn small ghost" type="button" data-prev="end">${ic("play")} Écouter la fin</button></div></div>
+      </div>
+      <div class="trim-summary" data-summary></div>
+      <p class="hint">Format <b>h:mm:ss</b> (secondes décimales possibles). Le rognage ne réencode pas : aucune perte de qualité. L'original est gardé, vous pourrez le restaurer.${job.on_r2 ? " Le fichier R2 est remplacé : <b>le lien de partage change</b>." : ""}</p>`,
+    buttons: [{ label: "Annuler", kind: "ghost", value: null },
+      ...(job.can_restore ? [{ label: "Restaurer l'original", kind: "ghost", value: "restore" }] : []),
+      { label: "Rogner", primary: true }],
+    onMount: (dlg) => {
+      const audio = dlg.querySelector("audio"), start = dlg.querySelector("[name=start]"), end = dlg.querySelector("[name=end]");
+      const summary = dlg.querySelector("[data-summary]");
+      const refresh = () => {
+        const s = parseClock(start.value), e = parseClock(end.value);
+        summary.textContent = isNaN(s) || isNaN(e) ? "Format d'heure invalide"
+          : e <= s ? "La fin doit être après le début"
+          : `Durée après rognage : ${clock(e - s).slice(0, -2)} (retire ${clock(Math.max(dur - (e - s), 0)).slice(0, -2)})`;
+      };
+      start.oninput = end.oninput = refresh;
+      refresh();
+      dlg.querySelectorAll("[data-mark]").forEach((b) => (b.onclick = () => {
+        (b.dataset.mark === "start" ? start : end).value = clock(audio.currentTime); refresh(); }));
+      dlg.querySelectorAll("[data-prev]").forEach((b) => (b.onclick = () => {
+        const e = parseClock(end.value), s = parseClock(start.value);
+        audio.onended = null;
+        if (b.dataset.prev === "start") audio.currentTime = isNaN(s) ? 0 : s;
+        else {  // les 8 dernières secondes conservées, puis arrêt à la fin choisie
+          audio.currentTime = Math.max(0, (isNaN(e) ? dur : e) - 8);
+          audio.ontimeupdate = () => { if (audio.currentTime >= e) { audio.pause(); audio.ontimeupdate = null; } };
+        }
+        audio.play();
+      }));
+    },
+    submit: async (dlg) => {
+      const s = parseClock(dlg.querySelector("[name=start]").value), e = parseClock(dlg.querySelector("[name=end]").value);
+      if (isNaN(s) || isNaN(e)) throw new Error("Format d'heure invalide (h:mm:ss)");
+      if (e <= s) throw new Error("La fin doit être après le début");
+      if (s < 0.05 && e > dur - 0.05) throw new Error("Rien à rogner : début et fin sont ceux du podcast");
+      await api(`/api/jobs/${job.id}/trim`, { method: "POST", body: { start: s < 0.05 ? "" : String(s), end: e > dur - 0.05 ? "" : String(e) } });
+      return "trimmed";
+    },
+  });
+  if (res === "trimmed") toast("Podcast rogné", "ok");
+  else if (res === "restore") {
+    if (!(await confirmBox({ title: "Restaurer l'original ?", message: "Le podcast reviendra à sa version d'avant le rognage." + (job.on_r2 ? " Le lien R2 changera." : ""), confirmLabel: "Restaurer" }))) return;
+    await api(`/api/jobs/${job.id}/trim/reset`, { method: "POST" });
+    toast("Original restauré", "ok");
+  } else return;
+  refreshView();
 }
 
 // ---------- Statut, parallélisme ----------
@@ -501,58 +579,114 @@ async function loadHistory(more = false, silent = false) {
   } catch (err) { if (!silent) toast(err.message, true); }
 }
 
-// ---------- Dossiers ----------
-const children = (pid) => state.folders.filter((f) => f.parent_id === pid).sort((a, b) => a.name.localeCompare(b.name, "fr"));
+// ---------- Dossiers : explorateur de fichiers ----------
+const children = (pid) => state.folders.filter((f) => (f.parent_id ?? null) === pid).sort((a, b) => a.name.localeCompare(b.name, "fr"));
 const byId = (id) => state.folders.find((f) => f.id === id);
 function pathOf(folder) {
   const out = [];
   for (let cur = folder; cur; cur = cur.parent_id ? byId(cur.parent_id) : null) out.unshift(cur);
   return out;
 }
+const isInside = (id, ancestorId) => pathOf(byId(id)).some((f) => f.id === ancestorId);  // id est-il dans ancestorId (ou égal) ?
 
 async function loadFolders() {
   state.folders = await api("/api/folders");
-  renderTree();
+  if (state.view === "folders") renderExplorer();
 }
 
-function renderTree() {
-  const build = (pid) => {
-    const kids = children(pid);
-    if (!kids.length) return "";
-    return "<ul>" + kids.map((f) => {
-      const hasKids = children(f.id).length > 0;
-      const open = state.expanded.has(f.id);
-      return `<li>
-        <div class="node ${state.view === "folder" && state.current === f.id ? "active" : ""}" data-id="${f.id}">
-          <span class="twisty" data-toggle="${f.id}">${hasKids ? (open ? "▾" : "▸") : ""}</span>
-          <span class="ficon">${ic("folder")}</span><span>${esc(f.name)}</span>
-        </div>
-        ${hasKids && open ? build(f.id) : ""}
-      </li>`;
-    }).join("") + "</ul>";
-  };
-  $("tree").innerHTML = build(null) || '<p class="hint" style="padding:0 8px">Aucun dossier</p>';
+const FOLDER_SVG = '<svg class="big" viewBox="0 0 64 64" aria-hidden="true"><path class="f-back" d="M5 15a4 4 0 0 1 4-4h14l6 6h26a4 4 0 0 1 4 4v6H5z"/><path class="f-front" d="M5 24h54v25a4 4 0 0 1-4 4H9a4 4 0 0 1-4-4z"/></svg>';
+const FILE_SVG = '<svg class="big" viewBox="0 0 64 64" aria-hidden="true"><path class="p-body" d="M14 5h26l11 11v37a4 4 0 0 1-4 4H14a4 4 0 0 1-4-4V9a4 4 0 0 1 4-4z"/><path class="p-fold" d="M40 5v11h11z"/><path class="p-note" d="M28 42V28l11-2v14"/><circle class="p-dot" cx="25" cy="42" r="3.5"/><circle class="p-dot" cx="36" cy="40" r="3.5"/></svg>';
+
+let foldView = "grid";
+try { foldView = localStorage.getItem("foldView") === "list" ? "list" : "grid"; } catch {}
+
+const plural = (n, one, many) => `${n} ${n > 1 ? many : one}`;
+
+function jobMeta(j) {
+  if (j.status === "running") return `${Math.round(j.progress * 100)} % — ${esc(j.step)}`;
+  if (j.status === "pending") return `En file n° ${j.queue_position}`;
+  if (j.status === "error") return "Erreur";
+  return [j.duration_output, fmtSize(j.size_mp3)].filter(Boolean).join(" · ");
 }
 
-$("tree").addEventListener("click", (e) => {
-  const tog = e.target.closest("[data-toggle]");
-  if (tog && tog.textContent) {
-    const id = +tog.dataset.toggle;
-    state.expanded.has(id) ? state.expanded.delete(id) : state.expanded.add(id);
-    saveExpanded();
-    renderTree();
-    return;
+function itemFolder(f) {
+  const subs = children(f.id).length;
+  const meta = [subs && plural(subs, "dossier", "dossiers"), f.job_count && plural(f.job_count, "podcast", "podcasts")].filter(Boolean).join(" · ") || "Vide";
+  return `<div class="item folder ${state.sel?.kind === "folder" && state.sel.id === f.id ? "sel" : ""}" data-kind="folder" data-id="${f.id}" draggable="true" title="${esc(f.name)}">
+    <div class="thumb">${FOLDER_SVG}</div><div class="name">${esc(f.name)}</div>
+    <div class="meta">${meta}</div><div class="c-type">Dossier</div><div class="c-date"></div></div>`;
+}
+
+function itemJob(j) {
+  const pct = Math.round(j.progress * 100);
+  return `<div class="item file st-${j.status} ${state.sel?.kind === "job" && state.sel.id === j.id ? "sel" : ""}" data-kind="job" data-id="${j.id}" draggable="true" title="${esc(j.title)}">
+    <div class="thumb">${FILE_SVG}${j.status !== "done" ? `<span class="dot ${j.status}"></span>` : ""}</div>
+    <div class="name">${esc(j.title)}</div>
+    <div class="meta">${jobMeta(j)}</div>
+    <div class="c-type">${LABELS[j.status]}</div><div class="c-date">${esc(j.date)}</div>
+    ${j.status === "running" ? `<div class="mini"><i style="width:${pct}%"></i></div>` : ""}</div>`;
+}
+
+function renderExplorer() {
+  const cur = state.current ? byId(state.current) : null;
+  if (state.current && !cur) return go("folders");
+  // barre de chemin : chaque segment est cliquable et accepte un dépôt
+  $("pathbar").innerHTML = [`<button data-crumb="" data-drop="">${ic("home")} Dossiers</button>`,
+    ...pathOf(cur).map((p) => `<span class="sep">›</span><button data-crumb="${p.id}" data-drop="${p.id}">${esc(p.name)}</button>`)].join("");
+  $("foldUp").disabled = !cur;
+  const q = $("foldSearch").value.trim().toLowerCase();
+  const folders = children(state.current ?? null).filter((f) => !q || f.name.toLowerCase().includes(q));
+  const jobs = cur ? state.jobs.filter((j) => !q || j.title.toLowerCase().includes(q)) : [];
+  $("newFolderBtn").hidden = !can("folders.manage");
+  $("newJobBtn").hidden = !cur || !can("jobs.create");
+  $("foldActions").hidden = $("newFolderBtn").hidden && $("newJobBtn").hidden;
+  const box = $("explorer");
+  box.className = "explorer " + foldView;
+  document.querySelectorAll("[data-fview]").forEach((b) => b.classList.toggle("active", b.dataset.fview === foldView));
+  if (!folders.length && !jobs.length) {
+    box.innerHTML = `<div class="explorer-empty"><div class="empty-icon">${ic("folder")}</div>
+      <b>${q ? "Aucun résultat" : cur ? "Ce dossier est vide" : "Aucun dossier"}</b>
+      <span>${q ? "Essayez une autre recherche." : cur ? "Ajoutez un sous-dossier ou lancez un traitement." : "Créez votre premier dossier (par exemple CULTE ROYAL)."}</span></div>`;
+  } else {
+    box.innerHTML = (foldView === "list" ? '<div class="list-head"><span></span><span>Nom</span><span>Détails</span><span>Type</span><span>Date</span></div>' : "")
+      + folders.map(itemFolder).join("") + jobs.map(itemJob).join("");
   }
-  const node = e.target.closest(".node");
-  if (node) openFolder(+node.dataset.id);
-});
-
-function openFolder(id) {
-  pathOf(byId(id)).slice(0, -1).forEach((f) => state.expanded.add(f.id));
-  saveExpanded();
-  go("folder", id);
+  const eff = cur ? effectiveIntro(cur) : null;
+  const introTxt = cur ? (eff ? `Intro : ${esc(eff.name)}${cur.intro_id ? "" : eff.from ? ` (héritée de « ${esc(eff.from.name)} »)` : " (par défaut)"}` : "Aucune intro") : "";
+  $("foldStatus").innerHTML = `<span>${plural(folders.length, "dossier", "dossiers")}${cur ? ` · ${plural(jobs.length, "podcast", "podcasts")}` : ""}</span>`
+    + (cur ? (can("folders.manage") ? `<button data-intro-dialog class="link-btn">${ic("music")} ${introTxt}</button>` : `<span>${introTxt}</span>`) : "");
 }
 
+function openItem(kind, id) {
+  if (kind === "folder") openFolder(id);
+  else openDetail(id);
+}
+function openFolder(id) { go("folders", id); }
+
+// ----- sélection, ouverture, navigation
+$("explorer").addEventListener("click", (e) => {
+  const it = e.target.closest(".item");
+  state.sel = it ? { kind: it.dataset.kind, id: +it.dataset.id } : null;
+  document.querySelectorAll("#explorer .item").forEach((x) => x.classList.toggle("sel", x === it));
+});
+$("explorer").addEventListener("dblclick", (e) => {
+  const it = e.target.closest(".item");
+  if (it) openItem(it.dataset.kind, +it.dataset.id);
+});
+$("pathbar").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-crumb]");
+  if (b) go("folders", b.dataset.crumb ? +b.dataset.crumb : null);
+});
+$("foldUp").onclick = () => { const cur = byId(state.current); if (cur) go("folders", cur.parent_id ?? null); };
+$("foldSearch").oninput = () => renderExplorer();
+document.querySelectorAll("[data-fview]").forEach((b) => (b.onclick = () => {
+  foldView = b.dataset.fview;
+  try { localStorage.setItem("foldView", foldView); } catch {}
+  renderExplorer();
+}));
+$("foldStatus").addEventListener("click", (e) => { if (e.target.closest("[data-intro-dialog]")) folderIntroDialog(byId(state.current)); });
+
+// ----- actions sur les dossiers
 async function createFolder(parentId) {
   const f = await promptBox({
     title: parentId ? "Nouveau sous-dossier" : "Nouveau dossier",
@@ -560,50 +694,223 @@ async function createFolder(parentId) {
     submit: (name) => api("/api/folders", { method: "POST", body: { name, parent_id: parentId } }),
   });
   if (!f || !f.id) return;
-  if (parentId) state.expanded.add(parentId);
-  saveExpanded();
   await loadFolders();
   toast("Dossier créé", "ok");
-  openFolder(f.id);
+  if (state.view !== "folders") go("folders", f.id);
 }
-
-function renderFolder() {
-  const f = byId(state.current);
-  if (!f) return;
-  const path = pathOf(f);
-  $("crumbs").innerHTML = path.map((p, i) => i < path.length - 1 ? `<a data-id="${p.id}">${esc(p.name)}</a> / ` : "").join("");
-  $("folderTitle").textContent = f.name;
-  $("subfolders").innerHTML = children(f.id).map((c) => `<div class="subfolder" data-id="${c.id}">${ic("folder")} ${esc(c.name)}</div>`).join("");
-  $("folderActions").hidden = !can("folders.manage");
-  $("jobFormCard").hidden = !can("jobs.create");
-  $("folderIntroSelect").disabled = !can("folders.manage");
-  renderFolderIntro();
-  updateFilenamePreview();
-}
-
-$("crumbs").addEventListener("click", (e) => { const a = e.target.closest("a"); if (a) openFolder(+a.dataset.id); });
-$("subfolders").addEventListener("click", (e) => { const d = e.target.closest(".subfolder"); if (d) openFolder(+d.dataset.id); });
-$("newRootBtn").onclick = () => createFolder(null);
-$("emptyNewBtn").onclick = () => createFolder(null);
-$("subfolderBtn").onclick = () => createFolder(state.current);
-$("renameBtn").onclick = async () => {
-  const f = byId(state.current);
+async function renameFolder(f) {
   const r = await promptBox({ title: "Renommer le dossier", label: "Nouveau nom", value: f.name,
     submit: (name) => api(`/api/folders/${f.id}`, { method: "PATCH", body: { name } }) });
-  if (r) { await loadFolders(); renderFolder(); toast("Dossier renommé", "ok"); }
-};
-$("deleteFolderBtn").onclick = async () => {
-  const f = byId(state.current);
+  if (r) { await loadFolders(); toast("Dossier renommé", "ok"); }
+}
+async function deleteFolder(f) {
   const ok = await confirmBox({ title: "Supprimer le dossier ?", danger: true, confirmLabel: "Supprimer",
     message: `Le dossier « <b>${esc(f.name)}</b> » sera supprimé. Il doit être vide (ni sous-dossier ni traitement).` });
   if (!ok) return;
   try {
     await api(`/api/folders/${f.id}`, { method: "DELETE" });
+    state.sel = null;
     await loadFolders();
     toast("Dossier supprimé", "ok");
-    f.parent_id ? openFolder(f.parent_id) : go("home");
   } catch (err) { alertBox({ title: "Suppression impossible", message: esc(err.message), kind: "danger" }); }
-};
+}
+
+async function folderIntroDialog(f) {
+  const r = await modal({
+    title: `Intro du dossier « ${f.name} »`,
+    body: `<label>Intro utilisée pour les podcasts de ce dossier<select name="intro">${introOptions([["", "Hériter (parent, sinon intro par défaut)"]], false, f.intro_id ?? "")}</select></label>
+      <div data-note class="hint"></div><div data-preview></div>`,
+    buttons: [{ label: "Annuler", kind: "ghost", value: null }, { label: "Enregistrer", primary: true }],
+    onMount: (dlg) => {
+      const sel = dlg.querySelector("[name=intro]");
+      const refresh = () => {
+        const chosen = sel.value ? { id: +sel.value, name: introName(+sel.value) } : effectiveIntro(byId(f.parent_id));
+        dlg.querySelector("[data-note]").textContent = sel.value ? "" : chosen ? `Hérité : ${chosen.name}` : "Aucune intro à hériter : ajoutez un MP3 dans le menu Intros.";
+        dlg.querySelector("[data-preview]").innerHTML = chosen ? `<audio controls preload="none" src="/api/intros/${chosen.id}/audio" style="width:100%"></audio>` : "";
+      };
+      sel.onchange = refresh; refresh();
+    },
+    submit: async (dlg) => {
+      const v = dlg.querySelector("[name=intro]").value;
+      await api(`/api/folders/${f.id}/intro`, { method: "PUT", body: { intro_id: v ? +v : null } });
+      return true;
+    },
+  });
+  if (r) { await loadFolders(); toast("Intro du dossier enregistrée", "ok"); }
+}
+
+// ----- déplacement (fenêtre « Déplacer vers… » et glisser-déposer)
+async function moveItem(kind, id, folderId) {
+  try {
+    if (kind === "folder") await api(`/api/folders/${id}`, { method: "PATCH", body: { parent_id: folderId } });
+    else await api(`/api/jobs/${id}/move`, { method: "POST", body: { folder_id: folderId } });
+    state.sel = null;
+    await Promise.all([loadFolders(), loadJobs()]);
+    toast("Élément déplacé", "ok");
+  } catch (err) { toast(err.message, true); }
+}
+function folderChoices(excludeId) {
+  const out = [];
+  const walk = (pid, depth) => children(pid).forEach((f) => {
+    if (f.id === excludeId) return;  // on ne propose ni le dossier déplacé ni ses sous-dossiers
+    out.push({ id: f.id, depth, name: f.name });
+    walk(f.id, depth + 1);
+  });
+  walk(null, 0);
+  return out;
+}
+async function moveDialog(kind, item) {
+  const isFolder = kind === "folder";
+  const here = isFolder ? (item.parent_id ?? null) : item.folder_id;
+  const choices = folderChoices(isFolder ? item.id : null);
+  const dest = await modal({
+    title: `Déplacer « ${isFolder ? item.name : item.title} »`,
+    body: `<div class="move-list">${isFolder ? `<label><input type="radio" name="dest" value="" ${here === null ? "checked" : ""}> ${ic("home")} Dossiers (racine)</label>` : ""}
+      ${choices.map((c) => `<label style="padding-left:${10 + c.depth * 20}px"><input type="radio" name="dest" value="${c.id}" ${here === c.id ? "checked" : ""}> ${ic("folder")} ${esc(c.name)}</label>`).join("")}</div>`,
+    buttons: [{ label: "Annuler", kind: "ghost", value: null }, { label: "Déplacer ici", primary: true }],
+    submit: async (dlg) => {
+      const r = dlg.querySelector("[name=dest]:checked");
+      if (!r) throw new Error("Choisissez un dossier de destination");
+      return r.value === "" ? "root" : +r.value;
+    },
+  });
+  if (dest === null || dest === undefined || dest === true) return;
+  const target = dest === "root" ? null : dest;
+  if (target === here) return;
+  await moveItem(kind, item.id, target);
+}
+
+let dragging = null;
+$("explorer").addEventListener("dragstart", (e) => {
+  const it = e.target.closest(".item");
+  if (!it || !can("folders.manage")) return e.preventDefault();
+  dragging = { kind: it.dataset.kind, id: +it.dataset.id };
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", `${dragging.kind}:${dragging.id}`);
+  it.classList.add("dragging");
+});
+document.addEventListener("dragend", () => { dragging = null; document.querySelectorAll(".dragging,.drop").forEach((x) => x.classList.remove("dragging", "drop")); });
+function dropTarget(e) {  // dossier ou segment du chemin sous la souris, s'il peut recevoir l'élément glissé
+  const el = e.target.closest(".item.folder, [data-drop]");
+  if (!el || !dragging) return null;
+  const id = el.dataset.drop !== undefined ? (el.dataset.drop === "" ? null : +el.dataset.drop) : +el.dataset.id;
+  if (dragging.kind === "job") {
+    const j = state.jobs.find((x) => x.id === dragging.id);
+    return id === null || (j && j.folder_id === id) ? null : { el, id };
+  }
+  const f = byId(dragging.id);
+  if (!f || id === dragging.id || (f.parent_id ?? null) === id || (id !== null && isInside(id, dragging.id))) return null;
+  return { el, id };
+}
+document.addEventListener("dragover", (e) => {
+  document.querySelectorAll(".drop").forEach((x) => x.classList.remove("drop"));
+  const t = dropTarget(e);
+  if (t) { e.preventDefault(); e.dataTransfer.dropEffect = "move"; t.el.classList.add("drop"); }
+});
+document.addEventListener("drop", (e) => {
+  const t = dropTarget(e);
+  if (!t) return;
+  e.preventDefault();
+  moveItem(dragging.kind, dragging.id, t.id);
+});
+
+// ----- menu contextuel (clic droit)
+const ctx = $("ctxMenu");
+function hideCtx() { ctx.hidden = true; }
+function showCtx(x, y, entries) {
+  ctx.innerHTML = entries.map((en, i) => en === "-" ? '<div class="ctx-sep"></div>'
+    : `<button data-i="${i}" class="${en.danger ? "danger" : ""}">${ic(en.icon)} ${esc(en.label)}</button>`).join("");
+  ctx.hidden = false;
+  ctx.style.left = Math.min(x, innerWidth - ctx.offsetWidth - 8) + "px";
+  ctx.style.top = Math.min(y, innerHeight - ctx.offsetHeight - 8) + "px";
+  ctx.onclick = (ev) => {
+    const b = ev.target.closest("button");
+    if (!b) return;
+    hideCtx();
+    entries[+b.dataset.i].run();
+  };
+}
+document.addEventListener("click", hideCtx);
+document.addEventListener("scroll", hideCtx, true);
+window.addEventListener("resize", hideCtx);
+
+function ctxEntries(kind, id) {
+  const e = [];
+  const manage = can("folders.manage");
+  if (kind === "folder") {
+    const f = byId(id);
+    e.push({ label: "Ouvrir", icon: "open", run: () => openFolder(id) });
+    if (manage) e.push("-",
+      { label: "Renommer", icon: "edit", run: () => renameFolder(f) },
+      { label: "Déplacer vers…", icon: "move", run: () => moveDialog("folder", f) },
+      { label: "Intro du dossier…", icon: "music", run: () => folderIntroDialog(f) },
+      { label: "Nouveau sous-dossier", icon: "plus", run: () => createFolder(id) },
+      "-", { label: "Supprimer", icon: "trash", danger: true, run: () => deleteFolder(f) });
+  } else if (kind === "job") {
+    const j = state.jobs.find((x) => x.id === id);
+    const act = (a) => () => busy(null, () => handleAction(a, id));
+    e.push({ label: j.has_mp3 ? "Détails et écoute" : "Détails", icon: "info", run: act("detail") });
+    if (j.has_mp3) e.push({ label: "Télécharger le MP3", icon: "download", run: () => { location.href = `/api/jobs/${id}/file/mp3?download=true`; } });
+    if (j.on_r2) e.push({ label: "Copier le lien", icon: "link", run: act("link") });
+    if (j.status === "done" && j.has_mp3 && can("jobs.trim")) e.push({ label: "Rogner…", icon: "scissors", run: act("trim") });
+    if ((j.status === "done" || j.status === "error") && can("jobs.create")) e.push({ label: "Relancer…", icon: "retry", run: act("retry") });
+    if (manage) e.push({ label: "Déplacer vers…", icon: "move", run: () => moveDialog("job", j) });
+    if (j.status !== "running" && can("jobs.delete")) e.push("-", { label: "Supprimer", icon: "trash", danger: true, run: act("delete") });
+  } else {
+    if (manage) e.push({ label: "Nouveau dossier", icon: "plus", run: () => createFolder(state.current) });
+    if (state.current && can("jobs.create")) e.push({ label: "Nouveau traitement", icon: "plus", run: openNewJob });
+    if (state.current && manage) e.push({ label: "Intro de ce dossier…", icon: "music", run: () => folderIntroDialog(byId(state.current)) });
+    e.push({ label: "Actualiser", icon: "refresh", run: () => { loadFolders(); loadJobs(); } });
+  }
+  return e;
+}
+$("explorer").addEventListener("contextmenu", (e) => {
+  e.preventDefault();
+  const it = e.target.closest(".item");
+  state.sel = it ? { kind: it.dataset.kind, id: +it.dataset.id } : null;
+  document.querySelectorAll("#explorer .item").forEach((x) => x.classList.toggle("sel", x === it));
+  const entries = ctxEntries(it?.dataset.kind, it && +it.dataset.id);
+  if (entries.length) showCtx(e.clientX, e.clientY, entries);
+});
+
+// ----- raccourcis clavier, comme un explorateur
+document.addEventListener("keydown", (e) => {
+  if (state.view !== "folders" || document.querySelector("dialog[open]") || /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
+  const s = state.sel;
+  if (e.key === "Escape") { hideCtx(); state.sel = null; renderExplorer(); }
+  else if (e.key === "Backspace") { e.preventDefault(); $("foldUp").click(); }
+  else if (s && e.key === "Enter") openItem(s.kind, s.id);
+  else if (s && s.kind === "folder" && e.key === "F2" && can("folders.manage")) { e.preventDefault(); renameFolder(byId(s.id)); }
+  else if (s && e.key === "Delete") {
+    if (s.kind === "folder" && can("folders.manage")) deleteFolder(byId(s.id));
+    else if (s.kind === "job" && can("jobs.delete")) handleAction("delete", s.id);
+  }
+});
+
+// ----- boutons de la barre d'actions
+$("newFolderBtn").onclick = () => createFolder(state.current);
+$("emptyNewBtn").onclick = () => createFolder(null);
+function openNewJob() {
+  const f = byId(state.current);
+  if (!f) return;
+  $("newJobWhere").textContent = `« ${f.name} »`;
+  $("newJobPanel").hidden = false;
+  updateFilenamePreview();
+  $("newJobPanel").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  form.youtube_url.focus();
+}
+$("newJobBtn").onclick = openNewJob;
+$("newJobClose").onclick = () => ($("newJobPanel").hidden = true);
+
+async function loadJobs() {
+  if (state.view !== "folders" || !state.current) return;
+  const folderId = state.current;
+  const jobs = await api(`/api/folders/${folderId}/jobs`).catch(() => null);
+  if (!jobs || folderId !== state.current || state.view !== "folders") return;
+  state.jobs = jobs;
+  renderExplorer();
+}
+
 
 // ---------- Intros (bibliothèque MP3) ----------
 const introName = (id) => state.intros.find((i) => i.id === id)?.name;
@@ -617,44 +924,22 @@ function effectiveIntro(folder) {  // intro du dossier, sinon du parent le plus 
   return d ? { name: d.name, id: d.id, from: null } : null;
 }
 
-function renderFolderIntro() {
-  const f = byId(state.current);
-  if (!f) return;
-  $("folderIntroSelect").innerHTML = introOptions([["", "Hériter (parent, sinon intro par défaut)"]], false, f.intro_id ?? "");
-  const eff = effectiveIntro(f);
-  $("folderIntroNote").textContent = eff
-    ? `Intro appliquée : ${eff.name}${f.intro_id ? "" : eff.from ? ` (héritée de « ${eff.from.name} »)` : " (par défaut)"}`
-    : "Aucune intro : ajoutez un MP3 dans la bibliothèque.";
-  $("folderIntroPlayer").innerHTML = eff ? `<audio controls preload="none" src="/api/intros/${eff.id}/audio"></audio>` : "";
-}
-
 function renderIntroSelects() {
   const keep = $("jobIntroSelect").value;
   $("jobIntroSelect").innerHTML = introOptions([["", "Automatique (intro du dossier, sinon par défaut)"]], true, keep);
-  const d = defaultIntro();
-  $("defaultIntro").textContent = d ? `★ ${d.name}` : "Aucune intro par défaut";
-  renderFolderIntro();
 }
 
 async function loadIntros() {
   state.intros = await api("/api/intros").catch(() => state.intros);
   renderIntroSelects();
-  if ($("introDialog").open) renderIntroList();
+  if (state.view === "intros") renderIntroList();
+  if (state.view === "folders") renderExplorer();
 }
-
-$("folderIntroSelect").onchange = async (e) => {
-  try {
-    await api(`/api/folders/${state.current}/intro`, { method: "PUT", body: { intro_id: e.target.value ? +e.target.value : null } });
-    await loadFolders();
-    renderFolderIntro();
-    toast("Intro du dossier enregistrée", "ok");
-  } catch (err) { toast(err.message, true); }
-};
 
 function renderIntroList() {
   const manage = can("intros.manage");
   $("introList").innerHTML = state.intros.length ? state.intros.map((i) => `
-    <div class="intro-item">
+    <div class="job intro-item">
       <div class="top">
         <div><b>${esc(i.name)}</b> <span class="muted">${esc(i.duration)}</span>
           ${i.is_default ? '<span class="badge default">Par défaut</span>' : ""}</div>
@@ -668,8 +953,6 @@ function renderIntroList() {
     </div>`).join("") : '<p class="muted">Aucune intro. Ajoutez un fichier MP3 ci-dessous : la première devient l\'intro par défaut.</p>';
 }
 
-$("introsBtn").onclick = () => { $("sidebar").classList.remove("open"); renderIntroList(); $("introDialog").showModal(); };
-$("introClose").onclick = () => $("introDialog").close();
 
 $("introList").addEventListener("click", async (e) => {
   const b = e.target.closest("[data-intro]");
@@ -736,42 +1019,136 @@ form.onsubmit = async (e) => {
       form.youtube_url.value = ""; form.title.value = ""; form.start.value = ""; form.end.value = "";
       updateFilenamePreview();
       toast("Traitement ajouté à la file d'attente", "ok");
-      loadJobs(); loadStatus();
+      $("newJobPanel").hidden = true;
+      loadJobs(); loadFolders(); loadStatus();
     } catch (err) { toast(err.message, true); }
   });
 };
 
-// Une ligne par traitement : lien | nom | date (facultative)
-$("batchBtn").onclick = (e) => busy(e.currentTarget, async () => {
-  const lines = $("batchText").value.split("\n").map((l) => l.trim()).filter(Boolean);
-  if (!lines.length) return toast("Aucune ligne à ajouter", true);
-  const intro = form.intro_id.value;
-  let ok = 0;
-  const failed = [];
-  for (const [i, line] of lines.entries()) {
-    const [url, title, date] = line.split("|").map((p) => p.trim());
-    try {
-      await api("/api/jobs", { method: "POST", body: { folder_id: state.current, youtube_url: url, title: title || "",
-        date: date || form.date.value, intro_id: intro === "" ? null : +intro } });
-      ok++;
-    } catch (err) { failed.push({ line, why: `ligne ${i + 1} : ${err.message}` }); }
-  }
-  $("batchText").value = failed.map((f) => f.line).join("\n");
-  if (ok) toast(`${ok} traitement(s) ajouté(s) à la file`, "ok");
-  if (failed.length) alertBox({ title: `${failed.length} ligne(s) non ajoutée(s)`, kind: "danger",
-    message: failed.map((f) => esc(f.why)).join("<br>") });
-  loadJobs(); loadStatus();
+// ---------- Liste de liens à préparer (ajout groupé) ----------
+let batch = [];
+try { batch = JSON.parse(localStorage.getItem("batch") || "[]"); } catch {}
+const saveBatch = () => { try { localStorage.setItem("batch", JSON.stringify(batch)); } catch {} };
+const newId = () => Math.random().toString(36).slice(2, 9);
+const fmtBounds = (r) => r.start || r.end ? `${r.start || "début"} → ${r.end || "fin"}` : "";
+
+function renderBatch() {
+  $("batchCount").textContent = batch.length || "";
+  $("batchList").innerHTML = batch.length ? batch.map((r, i) => `
+    <div class="batch-row ${r.error ? "err" : ""}" data-id="${r.id}">
+      <span class="n">${i + 1}</span>
+      <div style="min-width:0"><div class="t">${esc(r.title)} <span class="muted">· ${esc(r.date)}</span>
+        ${fmtBounds(r) ? `<span class="chip accent">${esc(fmtBounds(r))}</span>` : ""}</div>
+        <div class="u">${esc(r.url)}</div></div>
+      <div class="actions">
+        <button class="icon-btn" type="button" data-batch="edit" title="Modifier">${ic("edit")}</button>
+        <button class="icon-btn danger" type="button" data-batch="delete" title="Retirer de la liste">${ic("trash")}</button>
+      </div>
+      ${r.error ? `<div class="e">${esc(r.error)}</div>` : ""}
+    </div>`).join("") : '<div class="batch-empty">La liste est vide. Ajoutez un lien ci-dessus.</div>';
+  $("batchRunLabel").textContent = batch.length ? `Lancer ${batch.length} traitement${batch.length > 1 ? "s" : ""}` : "Lancer";
+  $("batchRunBtn").disabled = !batch.length;
+  $("batchClearBtn").disabled = !batch.length;
+}
+
+function checkRow(r) {
+  if (!/^https?:\/\//i.test(r.url)) return "Le lien doit commencer par http:// ou https://";
+  if (!r.title.trim()) return "Le nom est obligatoire";
+  return "";
+}
+
+function addBatchRow() {
+  const r = { id: newId(), url: $("batchUrl").value.trim(), title: $("batchTitle").value.trim(),
+    date: $("batchDate").value || form.date.value, start: "", end: "" };
+  const err = checkRow(r);
+  if (err) return toast(err, true);
+  batch.push(r);
+  saveBatch();
+  $("batchUrl").value = ""; $("batchTitle").value = "";
+  renderBatch();
+  $("batchUrl").focus();
+}
+$("batchAddBtn").onclick = addBatchRow;
+[$("batchUrl"), $("batchTitle"), $("batchDate")].forEach((el) => el.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addBatchRow(); } }));
+
+async function editBatchRow(r) {
+  const saved = await modal({
+    title: "Modifier ce traitement", wide: true,
+    body: `<label>Lien YouTube<input name="url" value="${esc(r.url)}"></label>
+      <div class="row"><label>Nom<input name="title" value="${esc(r.title)}"></label>
+      <label>Date<input name="date" type="date" value="${esc(r.date)}"></label></div>
+      <div class="row"><label>Début de la prédication (facultatif)<input name="start" placeholder="1:05:30" value="${esc(r.start)}"></label>
+      <label>Fin (facultatif)<input name="end" placeholder="2:10:00" value="${esc(r.end)}"></label></div>
+      <p class="hint">Début et fin vides = détection automatique.</p>`,
+    buttons: [{ label: "Annuler", kind: "ghost", value: null }, { label: "Enregistrer", primary: true }],
+    submit: async (dlg) => {
+      const v = (n) => dlg.querySelector(`[name=${n}]`).value.trim();
+      const next = { ...r, url: v("url"), title: v("title"), date: v("date") || r.date, start: v("start"), end: v("end"), error: "" };
+      const err = checkRow(next);
+      if (err) throw new Error(err);
+      Object.assign(r, next);
+    },
+  });
+  if (saved) { saveBatch(); renderBatch(); }
+}
+
+$("batchList").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-batch]");
+  if (!b) return;
+  const r = batch.find((x) => x.id === b.closest(".batch-row").dataset.id);
+  if (b.dataset.batch === "edit") await editBatchRow(r);
+  else { batch = batch.filter((x) => x !== r); saveBatch(); renderBatch(); }
 });
 
-async function loadJobs() {
-  if (state.view !== "folder" || !state.current) return;
-  const folderId = state.current;
-  if (!state.jobs.length) loadingLine($("jobs"));
-  const jobs = await api(`/api/folders/${folderId}/jobs`).catch(() => null);
-  if (!jobs || folderId !== state.current || state.view !== "folder") return;
-  state.jobs = jobs;
-  keepPlayers($("jobs"), jobs.length ? jobs.map((j) => jobCard(j)).join("") : '<p class="muted">Aucun traitement dans ce dossier.</p>');
-}
+$("batchClearBtn").onclick = async () => {
+  if (await confirmBox({ title: "Vider la liste ?", message: `Les ${batch.length} lien(s) préparés seront retirés de la liste (rien n'est supprimé ailleurs).`, confirmLabel: "Vider", danger: true })) {
+    batch = []; saveBatch(); renderBatch();
+  }
+};
+
+$("batchPasteBtn").onclick = async () => {
+  const added = await modal({
+    title: "Coller une liste de liens", wide: true,
+    body: `<p>Une ligne par traitement : <b>lien | nom | date</b> (la date est facultative).</p>
+      <textarea name="text" rows="7" placeholder="https://youtube.com/watch?v=… | La foi qui déplace les montagnes | 2026-10-11"></textarea>`,
+    buttons: [{ label: "Annuler", kind: "ghost", value: null }, { label: "Ajouter à la liste", primary: true }],
+    submit: async (dlg) => {
+      const rows = dlg.querySelector("[name=text]").value.split("\n").map((l) => l.trim()).filter(Boolean).map((line) => {
+        const [url, title, date] = line.split("|").map((p) => p.trim());
+        return { id: newId(), url: url || "", title: title || "", date: date || form.date.value, start: "", end: "", error: "" };
+      });
+      if (!rows.length) throw new Error("Aucune ligne à ajouter");
+      const bad = rows.map((r, i) => [i + 1, checkRow(r)]).filter(([, e]) => e);
+      if (bad.length) throw new Error(bad.map(([i, e]) => `Ligne ${i} : ${e}`).join(" — "));
+      batch.push(...rows);
+      return rows.length;
+    },
+  });
+  if (added) { saveBatch(); renderBatch(); toast(`${added} lien(s) ajouté(s) à la liste`, "ok"); }
+};
+
+$("batchRunBtn").onclick = (e) => busy(e.currentTarget, async () => {
+  if (!batch.length) return;
+  const intro = form.intro_id.value;
+  let ok = 0;
+  for (const r of [...batch]) {
+    try {
+      await api("/api/jobs", { method: "POST", body: { folder_id: state.current, youtube_url: r.url, title: r.title,
+        date: r.date, start: r.start || null, end: r.end || null, intro_id: intro === "" ? null : +intro } });
+      batch = batch.filter((x) => x !== r);
+      ok++;
+    } catch (err) { r.error = err.message; }
+    renderBatch();
+  }
+  saveBatch();
+  if (ok) toast(`${ok} traitement(s) ajouté(s) à la file`, "ok");
+  const failed = batch.filter((r) => r.error);
+  if (failed.length) alertBox({ title: `${failed.length} ligne(s) non lancée(s)`, kind: "danger",
+    message: "Elles restent dans la liste avec leur erreur : modifiez-les puis relancez." });
+  loadJobs(); loadStatus();
+});
+$("batchDate").value = form.date.value;
+renderBatch();
 
 // ---------- Détails d'un traitement ----------
 async function openDetail(id, silent = false) {
@@ -818,6 +1195,7 @@ async function openDetail(id, silent = false) {
     <details class="log" ${logOpen ? "open" : ""}><summary>Journal complet</summary>
       <pre class="detail-log">${esc(j.log || "(vide)")}</pre></details>
     <div class="dialog-foot">
+      ${j.status === "done" && j.has_mp3 && can("jobs.trim") ? `<button class="btn ghost" data-act="trim" data-id="${j.id}">${ic("scissors")} Rogner</button>` : ""}
       ${(j.status === "done" || j.status === "error") && can("jobs.create") ? `<button class="btn ghost" data-act="retry" data-id="${j.id}">Relancer</button>` : ""}
       ${j.status !== "running" && can("jobs.delete") ? `<button class="btn ghost danger" data-act="delete" data-id="${j.id}">Supprimer</button>` : ""}
     </div>`;
@@ -844,14 +1222,14 @@ async function loadUsers() {
       return `<div class="user-row">
         <div class="who"><span class="avatar">${esc(name.slice(0, 1).toUpperCase())}</span>
           <div><div class="job-title">${esc(name)} <span class="muted">@${esc(u.username)}</span>
-            ${u.is_admin ? '<span class="badge admin">Admin</span>' : ""}
+            ${u.is_system ? '<span class="badge admin">Système</span>' : u.is_admin ? '<span class="badge admin">Admin</span>' : ""}
             <span class="badge ${u.is_active ? "active" : "inactive"}">${u.is_active ? "Actif" : "Désactivé"}</span></div>
             <div class="job-sub">${u.last_login ? "Dernière connexion : " + fmtDate(u.last_login) : "Jamais connecté"}</div></div></div>
-        <div class="actions">
-          <button class="btn small ghost" data-user-act="edit" data-id="${u.id}">Modifier</button>
+        ${u.is_system ? `<div class="locked" title="${esc("Compte créé au démarrage de l'application")}">${ic("lock")} Compte système protégé</div>` : `<div class="actions">
+          <button class="btn small ghost" data-user-act="edit" data-id="${u.id}">${ic("edit")} Modifier</button>
           <button class="btn small ghost" data-user-act="toggle" data-id="${u.id}">${u.is_active ? "Désactiver" : "Activer"}</button>
           <button class="btn small ghost danger" data-user-act="delete" data-id="${u.id}">Supprimer</button>
-        </div>
+        </div>`}
         <div class="chips">${perms.length ? perms.map((p) => `<span class="chip">${esc(p)}</span>`).join("") : '<span class="chip">Aucune permission</span>'}</div>
       </div>`;
     }).join("");
