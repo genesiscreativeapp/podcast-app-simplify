@@ -13,6 +13,8 @@
     <button class="icon-btn menu-btn" id="menuBtn" aria-label="Dossiers">☰</button>
     <div class="brand"><span class="logo">◉</span> Studio Podcast</div>
     <div class="status" id="statusBar"></div>
+    <label class="parallel" title="Nombre de traitements menés en même temps ; les autres attendent en file">Parallèle
+      <select id="parallelSelect"></select></label>
   </header>
 
   <div class="layout">
@@ -90,6 +92,12 @@
                 <label>Fin <input name="end" placeholder="2:10:00"></label>
               </div>
               <p class="hint">Laisser vide pour une détection automatique. Renseigner ces champs évite l'étape de repérage (plus rapide).</p>
+            </details>
+            <details class="full">
+              <summary>Ajouter plusieurs liens d'un coup</summary>
+              <textarea id="batchText" rows="5" placeholder="https://youtube.com/watch?v=… | La foi qui déplace les montagnes | 2026-10-11&#10;https://youtube.com/watch?v=… | Le pouvoir de la prière"></textarea>
+              <p class="hint">Une ligne par traitement : <b>lien | nom | date</b> (date facultative : celle du formulaire est utilisée). Ils sont traités dans l'ordre, selon le nombre de traitements en parallèle. Les lignes en erreur restent dans la zone.</p>
+              <button class="btn small" type="button" id="batchBtn">Ajouter tout à la file</button>
             </details>
             <div class="full form-foot">
               <span class="hint" id="filenamePreview"></span>

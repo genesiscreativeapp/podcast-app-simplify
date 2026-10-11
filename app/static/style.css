@@ -29,7 +29,7 @@
 body { margin: 0; font-family: Inter, system-ui, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
 h1 { font-size: 24px; margin: 0; }
 h3 { margin: 0 0 12px; font-size: 15px; }
-input { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; width: 100%; }
+input, textarea { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; width: 100%; }
 input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
 .topbar { height: 56px; display: flex; align-items: center; gap: 12px; padding: 0 20px; background: var(--side); color: #fff; position: sticky; top: 0; z-index: 10; }
@@ -178,3 +178,14 @@ label.check input { width: auto; }
 .intro-item audio { width: 100%; height: 34px; margin-top: 8px; }
 .badge.default { background: var(--ok-soft); color: var(--ok); }
 .intro-add { margin-top: 14px; border-top: 1px solid var(--border); }
+
+/* File d'attente et parallélisme */
+.queued { margin: 12px 0 4px; padding: 8px 12px; border-radius: 8px; background: var(--accent-soft); color: var(--accent); font-size: 13px; }
+.pill.link { cursor: pointer; }
+.pill.busy { background: rgba(255, 190, 80, .2); color: #ffd48a; }
+.pill.waiting { background: rgba(140, 120, 255, .22); color: #cfc6ff; }
+.parallel { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--side-text); white-space: nowrap; }
+.parallel select { padding: 3px 6px; font-size: 12px; background: rgba(255,255,255,.1); color: #fff; border-color: rgba(255,255,255,.2); }
+.parallel select option { color: #000; }
+textarea { width: 100%; resize: vertical; margin-top: 8px; }
+@media (max-width: 700px) { .parallel { display: none; } }

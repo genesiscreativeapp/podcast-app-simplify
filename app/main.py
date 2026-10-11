@@ -13,7 +13,8 @@ from sqlalchemy import or_
 
 from . import config, storage
 from .pipeline import audio
-from .db import Folder, Intro, Job, SessionLocal, folder_path, init_db
+from .db import (MAX_PARALLEL_LIMIT, Folder, Intro, Job, Setting, SessionLocal, folder_path,
+                 get_max_parallel, init_db, queue_position)
 from .pipeline import steps
 from .utils import fmt_time, parse_time, slugify
 
@@ -79,9 +80,10 @@ def job_dict(j: Job, with_log: bool = False, s=None) -> dict:
         "created_at": j.created_at.isoformat() if j.created_at else None,
         "finished_at": j.finished_at.isoformat() if j.finished_at else None,
     }
-    if s is not None:  # historique et détail : on indique le dossier
+    if s is not None:
         folder = s.get(Folder, j.folder_id)
         d["folder_path"] = " / ".join(folder_path(s, folder)) if folder else ""
+        d["queue_position"] = queue_position(s, j) if j.status == "pending" else None
     if with_log:
         d["log"] = j.log
     return d
@@ -266,7 +268,7 @@ def _times(start, end):
 def list_jobs(folder_id: int, s=Depends(db)):
     jobs = (s.query(Job).filter(Job.folder_id == folder_id)
             .order_by(Job.date.desc(), Job.id.desc()).all())
-    return [job_dict(j) for j in jobs]
+    return [job_dict(j, s=s) for j in jobs]
 
 
 @app.post("/api/jobs")
@@ -290,7 +292,7 @@ def create_job(body: JobIn, s=Depends(db)):
               filename=f"{slugify(title)}_{day}", start_override=start, end_override=end)
     s.add(job)
     s.commit()
-    return job_dict(job)
+    return job_dict(job, s=s)
 
 
 @app.get("/api/jobs")
@@ -338,9 +340,10 @@ def retry_job(job_id: int, body: RetryIn, s=Depends(db)):
         _check_intro(s, body.intro_id)
         job.intro_id = body.intro_id
     job.status, job.step, job.progress, job.error = "pending", "En attente", 0.0, None
+    job.updated_at = datetime.utcnow()  # repart en fin de file
     job.log = (job.log or "") + f"\n--- Relancé le {datetime.now():%d/%m/%Y %H:%M} ---\n"
     s.commit()
-    return job_dict(job)
+    return job_dict(job, s=s)
 
 
 @app.delete("/api/jobs/{job_id}")
@@ -380,11 +383,26 @@ def job_link(job_id: int, fmt: str, s=Depends(db)):
 
 @app.get("/api/status")
 def status(s=Depends(db)):
+    count = lambda st: s.query(Job).filter(Job.status == st).count()
     return {
         "r2": storage.enabled(),
         "llm": config.LLM_PROVIDER if config.LLM_PROVIDER in ("anthropic", "openai") else None,
-        "queue": s.query(Job).filter(Job.status.in_(["pending", "running"])).count(),
+        "running": count("running"), "pending": count("pending"),
+        "max_parallel": get_max_parallel(s), "max_parallel_limit": MAX_PARALLEL_LIMIT,
     }
+
+
+class SettingsIn(BaseModel):
+    max_parallel: int
+
+
+@app.put("/api/settings")
+def put_settings(body: SettingsIn, s=Depends(db)):
+    if not 1 <= body.max_parallel <= MAX_PARALLEL_LIMIT:
+        raise HTTPException(400, f"Entre 1 et {MAX_PARALLEL_LIMIT} traitements en parallèle")
+    s.merge(Setting(key="max_parallel", value=str(body.max_parallel)))
+    s.commit()
+    return {"max_parallel": body.max_parallel}
 
 
 @app.get("/healthz")

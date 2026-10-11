@@ -296,6 +296,18 @@ function renderSteps(j) {
     : `<ul class="steps">${rows}</ul>`;
 }
 
+// Ligne d'avancement d'un traitement actif : rang dans la file, ou barre globale s'il tourne
+function liveBlock(j) {
+  if (j.status === "pending") {
+    const note = j.step && j.step !== "En attente" ? ` · ${esc(j.step)}` : "";
+    return `<div class="queued">⏳ En file d'attente — <b>n° ${j.queue_position}</b>${note}</div>`;
+  }
+  if (j.status !== "running") return "";
+  const pct = Math.round(j.progress * 100);
+  return `<div class="progress"><div style="width:${pct}%"></div></div>
+    <div class="step"><b>Global ${pct}%</b> — ${esc(j.step)}</div>`;
+}
+
 const LABELS = { pending: "En attente", running: "En cours", done: "Terminé", error: "Erreur" };
 
 function renderJobs() {
@@ -320,9 +332,7 @@ function renderJobs() {
         </div>
         <span class="badge ${j.status}">${LABELS[j.status]}</span>
       </div>
-      ${j.status === "pending" || j.status === "running" ? `
-        <div class="progress"><div style="width:${pct}%"></div></div>
-        <div class="step"><b>Global ${pct}%</b> — ${esc(j.step)}</div>` : ""}
+      ${liveBlock(j)}
       ${renderSteps(j)}
       ${stats.length ? `<div class="stats">${stats.map((s) => `<span>${s}</span>`).join("")}</div>` : ""}
       ${j.detection_note && j.status === "done" ? `<div class="hint">${esc(j.detection_note)}</div>` : ""}
@@ -414,8 +424,52 @@ async function loadStatus() {
   $("statusBar").innerHTML = `
     <span class="pill ${s.r2 ? "on" : ""}">R2 ${s.r2 ? "connecté" : "non configuré"}</span>
     <span class="pill ${s.llm ? "on" : ""}">Détection ${s.llm ? "IA (" + s.llm + ")" : "heuristique"}</span>
-    <span class="pill queue">${s.queue} en file</span>`;
+    <span class="pill link ${s.running ? "busy" : ""}" data-queue>▶ ${s.running}/${s.max_parallel} en cours</span>
+    <span class="pill link ${s.pending ? "waiting" : ""}" data-queue>⏳ ${s.pending} en file</span>`;
+  const sel = $("parallelSelect");
+  if (!sel.options.length) {
+    for (let n = 1; n <= s.max_parallel_limit; n++) sel.add(new Option(n, n));
+  }
+  if (document.activeElement !== sel) sel.value = s.max_parallel;
 }
+
+$("statusBar").addEventListener("click", (e) => {
+  if (!e.target.closest("[data-queue]")) return;
+  $("histStatus").value = "active";
+  showHistory(true);
+});
+$("parallelSelect").onchange = async (e) => {
+  try {
+    await api("/api/settings", { method: "PUT", body: { max_parallel: +e.target.value } });
+    toast(`${e.target.value} traitement(s) en parallèle`);
+    loadStatus();
+  } catch (err) { toast(err.message, true); }
+};
+setInterval(loadStatus, 5000);
+
+// ---------- Ajout de plusieurs liens ----------
+// Une ligne par traitement : lien | nom | date (AAAA-MM-JJ, facultative). Ils rejoignent la file dans l'ordre.
+$("batchBtn").onclick = async () => {
+  const lines = $("batchText").value.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (!lines.length) return toast("Aucune ligne", true);
+  const intro = form.intro_id.value;
+  let ok = 0;
+  const errors = [];
+  for (const [i, line] of lines.entries()) {
+    const [url, title, date] = line.split("|").map((p) => p.trim());
+    try {
+      await api("/api/jobs", { method: "POST", body: {
+        folder_id: state.current, youtube_url: url, title: title || "", date: date || form.date.value,
+        intro_id: intro === "" ? null : +intro } });
+      ok++;
+    } catch (err) { errors.push(`ligne ${i + 1} : ${err.message}`); }
+  }
+  if (!errors.length) $("batchText").value = "";
+  else $("batchText").value = lines.filter((_, i) => errors.some((e) => e.startsWith(`ligne ${i + 1} :`))).join("\n");
+  toast(`${ok} ajouté(s) à la file` + (errors.length ? ` · ${errors.join(" ; ")}` : ""), errors.length > 0);
+  loadJobs();
+  loadStatus();
+};
 
 // ---------- Historique ----------
 const fmtDate = (iso) => iso ? new Date(/Z|[+-]\d\d:\d\d$/.test(iso) ? iso : iso + "Z")
@@ -468,8 +522,7 @@ function renderHistory() {
         <div class="job-sub">📁 ${esc(j.folder_path || "")}${j.video_title ? " · " + esc(j.video_title) : ""}</div>
       </div>
       <span class="badge ${j.status}">${LABELS[j.status]}</span>
-      ${live ? `<div class="progress"><div style="width:${pct}%"></div></div>
-        <div class="h-meta"><b>${pct}%</b><span>${esc(j.step)}</span></div>`
+      ${live ? `<div style="grid-column:1/3">${liveBlock(j)}</div>`
         : `<div class="h-meta">${meta.map((m) => `<span>${esc(m)}</span>`).join("")}</div>`}
       <div class="actions" style="grid-column:1/3">
         <button class="btn small ghost" data-act="detail" data-id="${j.id}">Détails</button>
@@ -502,9 +555,7 @@ async function openDetail(id) {
   const links = linkRow("mp3");
   $("detailBody").innerHTML = `
     <div class="job-top"><div class="job-sub">📁 ${esc(j.folder_path)}</div><span class="badge ${j.status}">${LABELS[j.status]}</span></div>
-    ${j.status === "pending" || j.status === "running"
-      ? `<div class="progress"><div style="width:${Math.round(j.progress * 100)}%"></div></div>
-         <div class="step"><b>Global ${Math.round(j.progress * 100)}%</b> — ${esc(j.step)}</div>` : ""}
+    ${liveBlock(j)}
     ${j.error ? `<div class="err-box">${esc(j.error)}</div>` : ""}
 
     ${j.has_mp3 || links ? `<div class="d-title">Écouter et télécharger</div>

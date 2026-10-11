@@ -179,8 +179,11 @@ def run_job(job_id: int) -> None:
 
 
 def _prune_cache() -> None:
-    """Ne garde que les audios YouTube des derniers traitements (ils pèsent 100 à 250 Mo)."""
-    dirs = sorted((d for d in config.CACHE_DIR.iterdir() if d.is_dir()),
+    """Ne garde que les audios YouTube des derniers traitements (ils pèsent 100 à 250 Mo).
+    Ne touche jamais à celui d'un traitement en cours (plusieurs tournent en parallèle)."""
+    with SessionLocal() as s:
+        busy = {str(i) for (i,) in s.query(Job.id).filter(Job.status == "running")}
+    dirs = sorted((d for d in config.CACHE_DIR.iterdir() if d.is_dir() and d.name not in busy),
                   key=lambda d: d.stat().st_mtime, reverse=True)
     for d in dirs[config.KEEP_SOURCES:]:
         shutil.rmtree(d, ignore_errors=True)

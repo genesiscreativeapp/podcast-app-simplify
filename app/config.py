@@ -49,6 +49,11 @@ WHISPER_BEAM_EDIT = int(_env("WHISPER_BEAM_EDIT", "1"))  # 1 = rapide ; 5 = plus
 # Repérage : secondes transcrites par fenêtre de 30 s (15 = moitié moins de travail ; 30 = tout)
 DETECT_CLIP = int(_env("DETECT_CLIP", "15"))
 
+# --- File d'attente ------------------------------------------------------------
+# Traitements menés en même temps (modifiable depuis l'interface). Ils partagent les mêmes modèles Whisper
+# et les mêmes cœurs : au-delà de 2-3, chacun va plus lentement.
+MAX_PARALLEL_JOBS = int(_env("MAX_PARALLEL_JOBS", "2"))
+
 # --- Détection de la prédication par LLM (optionnel) ----------------------
 # none | anthropic | openai   (openai = toute API compatible : OpenAI, Groq, Ollama...)
 LLM_PROVIDER = _env("LLM_PROVIDER", "none").lower()

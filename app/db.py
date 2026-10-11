@@ -5,6 +5,7 @@ from pathlib import Path
 from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, create_engine, event, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
+from . import config
 from .config import DB_PATH
 
 engine = create_engine(
@@ -25,6 +26,13 @@ SessionLocal = sessionmaker(engine, expire_on_commit=False)
 
 class Base(DeclarativeBase):
     pass
+
+
+class Setting(Base):
+    """Réglages modifiables depuis l'interface (clé / valeur)."""
+    __tablename__ = "settings"
+    key: Mapped[str] = mapped_column(String(50), primary_key=True)
+    value: Mapped[str] = mapped_column(String(200))
 
 
 class Intro(Base):
@@ -93,6 +101,31 @@ def init_db() -> None:
             cols = {r[1] for r in conn.execute(text(f"PRAGMA table_info({table})"))}
             if col not in cols:
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} INTEGER"))
+
+
+MAX_PARALLEL_LIMIT = 8
+
+
+def get_max_parallel(session) -> int:
+    row = session.get(Setting, "max_parallel")
+    try:
+        n = int(row.value) if row else config.MAX_PARALLEL_JOBS
+    except ValueError:
+        n = config.MAX_PARALLEL_JOBS
+    return min(max(n, 1), MAX_PARALLEL_LIMIT)
+
+
+# Ordre de la file : le plus ancien en attente d'abord (un « Relancer » repart en fin de file)
+QUEUE_ORDER = (Job.updated_at, Job.id)
+
+
+def queue_position(session, job: Job) -> int:
+    """Rang (1 = prochain) d'un traitement en attente."""
+    ahead = session.query(Job).filter(
+        Job.status == "pending",
+        (Job.updated_at < job.updated_at) | ((Job.updated_at == job.updated_at) & (Job.id < job.id)),
+    ).count()
+    return ahead + 1
 
 
 def folder_path(session, folder: Folder) -> list[str]:

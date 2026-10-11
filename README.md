@@ -24,7 +24,7 @@ Au premier traitement, les modèles Whisper sont téléchargés dans `data/model
 
 1. Créer un dossier (ex. **CULTE ROYAL**), éventuellement des sous-dossiers.
 2. Ajouter vos **intros** (fichiers **MP3**) dans la bibliothèque (**🎵 Gérer les intros**, barre latérale). La première devient l'intro par défaut ; on peut en changer à tout moment. Chaque dossier peut avoir la sienne (un sous-dossier hérite de son parent), et chaque traitement peut en choisir une autre, ou aucune, dans le formulaire.
-3. Coller le lien YouTube, le nom et la date, puis **Lancer le traitement**.
+3. Coller le lien YouTube, le nom et la date, puis **Lancer le traitement** — ou **Ajouter plusieurs liens d'un coup** (une ligne `lien | nom | date` par traitement).
 4. Suivre l'avancement en direct, écouter le résultat, télécharger le MP3 ou copier le lien R2.
 5. Si la prédication détectée n'est pas la bonne : **Relancer** en saisissant le début et la fin (format `1:05:30`).
 
@@ -61,7 +61,7 @@ Le traitement est optimisé pour les cultes de 4 h 30 et plus :
 - **YouTube** : audio léger (≈ 50-70 kb/s) téléchargé par 4 fragments simultanés ; il est gardé en cache, donc **Relancer** ne retélécharge rien.
 
 Pour aller plus vite : saisir les bornes (le repérage disparaît), `DETECT_CLIP=10`. Pour plus de précision : `WHISPER_MODEL_DETECT=base`, `WHISPER_BEAM_EDIT=5`, `YTDLP_FORMAT=bestaudio/best`.
-Les traitements sont faits un par un, dans l'ordre d'arrivée.
+Plusieurs traitements peuvent tourner en même temps (réglage **Parallèle** en haut de l'interface, 1 à 8, `MAX_PARALLEL_JOBS` au démarrage). Les autres attendent en file, affichés « n° 1, n° 2… », et le suivant démarre dès qu'une place se libère. Ils partagent les mêmes cœurs et les mêmes modèles Whisper : le gain vient surtout du chevauchement des étapes (téléchargement, ffmpeg, envoi) avec la transcription ; au-delà de 2-3, chacun va plus lentement. Chaque traitement garde l'audio de sa prédication en mémoire : surveillez la RAM avant d'augmenter le parallélisme.
 
 ## Taille des fichiers
 
