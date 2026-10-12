@@ -43,6 +43,17 @@ def build_transcript(segments: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _check_llm(r: httpx.Response) -> None:
+    """Remonte le message de l'API (crédit épuisé, modèle inconnu, clé refusée…) au lieu d'un simple « 400 »."""
+    if r.is_success:
+        return
+    try:
+        msg = r.json()["error"]["message"]
+    except Exception:
+        msg = r.text[:300]
+    raise RuntimeError(f"API {config.LLM_PROVIDER} {r.status_code} : {msg}")
+
+
 def ask_llm(prompt: str, max_tokens: int = 400) -> str:
     timeout = httpx.Timeout(180.0)
     if config.LLM_PROVIDER == "anthropic":
@@ -54,7 +65,7 @@ def ask_llm(prompt: str, max_tokens: int = 400) -> str:
                   "messages": [{"role": "user", "content": prompt}]},
             timeout=timeout,
         )
-        r.raise_for_status()
+        _check_llm(r)
         return "".join(b.get("text", "") for b in r.json()["content"])
     # API compatible OpenAI (OpenAI, Groq, OpenRouter, Ollama, LM Studio…)
     headers = {"content-type": "application/json"}
@@ -67,7 +78,7 @@ def ask_llm(prompt: str, max_tokens: int = 400) -> str:
               "messages": [{"role": "user", "content": prompt}]},
         timeout=timeout,
     )
-    r.raise_for_status()
+    _check_llm(r)
     return r.json()["choices"][0]["message"]["content"]
 
 
@@ -130,7 +141,7 @@ def detect_sermon(segments: list[dict], duration: float, title: str | None, log)
         try:
             start, end, note = detect_with_llm(segments, title)
             if 0 <= start < end <= duration + 5 and end - start >= 120:
-                return start, min(end + 2, duration), note
+                return start, min(end + CHUNK, duration), note  # la ligne citée dure CHUNK s : la fin est dedans
             log(f"Bornes IA incohérentes ({start}–{end}), passage à l'heuristique")
         except Exception as exc:  # réseau, quota, JSON…
             log(f"Détection IA impossible ({exc}), passage à l'heuristique")

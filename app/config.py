@@ -23,6 +23,8 @@ for _d in (WORK_DIR, OUTPUT_DIR, INTRO_DIR, CACHE_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 KEEP_WORK_FILES = _bool("KEEP_WORK_FILES", False)
+UPLOAD_SCHEME = "upload://"  # youtube_url d'un traitement créé à partir d'un fichier envoyé
+MAX_UPLOAD_MB = int(_env("MAX_UPLOAD_MB", "4096"))  # taille maximale d'un fichier audio/vidéo envoyé
 KEEP_SOURCES = int(_env("KEEP_SOURCES", "5"))  # nombre d'audios YouTube gardés en cache (0 = aucun)
 
 # --- Accès à l'interface (HTTP Basic) -------------------------------------
@@ -82,6 +84,9 @@ REMOVE_OFFTOPIC = _bool("REMOVE_OFFTOPIC", True)
 # l'adoration qui précède et les annonces qui suivent. Sans marge, un début repéré un peu tard couperait le message.
 OFFTOPIC_PAD_BEFORE = float(_env("OFFTOPIC_PAD_BEFORE", "90"))
 OFFTOPIC_PAD_AFTER = float(_env("OFFTOPIC_PAD_AFTER", "60"))
+# Fin du podcast : fondu de sortie (s) ; et marge (s) lue au-delà de la fin repérée pour la terminer sur une fin de phrase
+FADE_OUT = float(_env("FADE_OUT", "2.5"))
+END_MARGIN = float(_env("END_MARGIN", "25"))
 REMOVE_FILLERS = _bool("REMOVE_FILLERS", True)
 
 # --- Compression -------------------------------------------------------------

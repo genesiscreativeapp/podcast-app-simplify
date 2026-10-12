@@ -110,7 +110,7 @@ def user_perms(user: User) -> list[str]:
 
 def user_dict(user: User) -> dict:
     return {"id": user.id, "username": user.username, "display_name": user.display_name,
-            "is_admin": user.is_admin, "is_active": user.is_active, "is_system": user.is_system, "permissions": user_perms(user),
+            "is_admin": user.is_admin, "is_active": user.is_active, "is_system": user.is_system, "max_parallel": user.max_parallel, "permissions": user_perms(user),
             "created_at": user.created_at.isoformat() if user.created_at else None,
             "last_login": user.last_login.isoformat() if user.last_login else None}
 

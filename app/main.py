@@ -12,14 +12,17 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_
 
 from . import auth, config, r2sync, storage
+from .access import Access
 from .pipeline import audio
-from .db import (MAX_PARALLEL_LIMIT, Folder, Intro, Job, Setting, SessionLocal, User, folder_path,
+from .db import (MAX_PARALLEL_LIMIT, Folder, FolderAccess, Intro, Job, Setting, SessionLocal, User, folder_path,
                  get_max_parallel, init_db, queue_position)
 from .pipeline import steps
 from .utils import fmt_time, parse_time, slugify
 
 STATIC = Path(__file__).parent / "static"
 MAX_INTRO_BYTES = 25 * 1024 * 1024
+UPLOAD_SCHEME = config.UPLOAD_SCHEME
+UPLOAD_EXT = {".mp3", ".m4a", ".aac", ".wav", ".flac", ".ogg", ".opus", ".wma", ".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".mpeg", ".mpg", ".3gp"}
 
 app = FastAPI(title="Studio Podcast")
 init_db()
@@ -46,6 +49,10 @@ def db():
         yield s
 
 
+def acl(request: Request, s=Depends(db)) -> Access:
+    return Access(s, request.state.user)
+
+
 # --- Sérialisation ---------------------------------------------------------------
 def folder_dict(f: Folder) -> dict:
     return {"id": f.id, "name": f.name, "parent_id": f.parent_id, "intro_id": f.intro_id}
@@ -53,6 +60,8 @@ def folder_dict(f: Folder) -> dict:
 
 def job_steps(j: Job) -> list[dict]:
     skipped = set()
+    if j.youtube_url.startswith(UPLOAD_SCHEME):
+        skipped.add("download")  # fichier envoyé par l'utilisateur : rien à télécharger
     if j.start_override is not None or j.end_override is not None:
         skipped.add("detect")  # bornes saisies : pas de repérage
     if not (j.r2_key_mp3 if j.status == "done" else storage.enabled()):
@@ -62,7 +71,7 @@ def job_steps(j: Job) -> list[dict]:
     return steps.view(j.progress or 0.0, j.status, skipped)
 
 
-def job_dict(j: Job, with_log: bool = False, s=None) -> dict:
+def job_dict(j: Job, with_log: bool = False, s=None, a: Access | None = None) -> dict:
     d = {
         "steps": job_steps(j),
         "id": j.id, "folder_id": j.folder_id, "intro_id": j.intro_id, "youtube_url": j.youtube_url,
@@ -80,15 +89,22 @@ def job_dict(j: Job, with_log: bool = False, s=None) -> dict:
         "on_r2": bool(j.r2_key_mp3),
         "created_at": j.created_at.isoformat() if j.created_at else None,
         "finished_at": j.finished_at.isoformat() if j.finished_at else None,
-        "edit_note": j.edit_note, "created_by": j.created_by,
+        "edit_note": j.edit_note, "created_by": j.created_by, "from_upload": j.youtube_url.startswith(UPLOAD_SCHEME),
         "display_filename": r2sync.display_filename(j), "r2_key": j.r2_key_mp3,
     }
     if s is not None:
         folder = s.get(Folder, j.folder_id)
         d["folder_path"] = " / ".join(folder_path(s, folder)) if folder else ""
         d["queue_position"] = queue_position(s, j) if j.status == "pending" else None
+    if a is not None:
+        d["can_edit"] = a.owns_job(j)
     if with_log:
         d["log"] = j.log
+    if a is not None and not a.admin:  # utilisateur lambda : pas de détails techniques (source, repérage, montage, journal, chemin R2)
+        d.update(youtube_url="", video_title=None, start_override="", end_override="", sermon_start="", sermon_end="",
+                 detection_note=None, edit_note=None, duration_source="", r2_key=None,
+                 error="Le traitement a échoué. Contactez un administrateur." if j.error else None)
+        d.pop("log", None)
     return d
 
 
@@ -113,20 +129,38 @@ def _check_sibling(s, parent_id, name, exclude_id=None):
 
 
 @app.get("/api/folders", dependencies=[Depends(auth.need("jobs.view"))])
-def list_folders(s=Depends(db)):
+def list_folders(request: Request, s=Depends(db), a: Access = Depends(acl)):
     counts = dict(s.query(Job.folder_id, func.count(Job.id)).group_by(Job.folder_id).all())
-    return [{**folder_dict(f), "job_count": counts.get(f.id, 0)} for f in s.query(Folder).order_by(Folder.name).all()]
+    active = {(fid, st): n for fid, st, n in s.query(Job.folder_id, Job.status, func.count(Job.id))
+              .filter(Job.status.in_(["pending", "running"])).group_by(Job.folder_id, Job.status)}
+    shared = {}
+    if a.admin:
+        for fid, uid in s.query(FolderAccess.folder_id, FolderAccess.user_id):
+            shared.setdefault(fid, []).append(uid)
+    visible = a.visible_ids()
+    out = []
+    for f in s.query(Folder).order_by(Folder.name).all():
+        if f.id not in visible:
+            continue
+        d = folder_dict(f)
+        if f.parent_id not in visible:
+            d["parent_id"] = None  # racine « virtuelle » d'un dossier attribué : on ne montre pas ce qui est au-dessus
+        out.append({**d, "job_count": counts.get(f.id, 0), "running": active.get((f.id, "running"), 0),
+                    "pending": active.get((f.id, "pending"), 0), "created_by": f.created_by,
+                    "can_edit": a.owns_folder(f.id), "assigned": f.id in a.assigned,
+                    **({"shared_with": shared.get(f.id, [])} if a.admin else {})})
+    return out
 
 
 @app.post("/api/folders", dependencies=[Depends(auth.need("folders.manage"))])
-def create_folder(body: FolderIn, s=Depends(db)):
+def create_folder(body: FolderIn, request: Request, s=Depends(db), a: Access = Depends(acl)):
     name = body.name.strip()
     if not name:
         raise HTTPException(400, "Nom de dossier vide")
-    if body.parent_id and not s.get(Folder, body.parent_id):
-        raise HTTPException(404, "Dossier parent introuvable")
+    if body.parent_id:
+        a.need_folder(body.parent_id)
     _check_sibling(s, body.parent_id, name)
-    f = Folder(name=name, parent_id=body.parent_id)
+    f = Folder(name=name, parent_id=body.parent_id, created_by=request.state.user.username)
     s.add(f)
     s.commit()
     r2sync.trigger()
@@ -134,9 +168,9 @@ def create_folder(body: FolderIn, s=Depends(db)):
 
 
 @app.patch("/api/folders/{folder_id}", dependencies=[Depends(auth.need("folders.manage"))])
-def update_folder(folder_id: int, body: FolderPatch, s=Depends(db)):
+def update_folder(folder_id: int, body: FolderPatch, s=Depends(db), a: Access = Depends(acl)):
     """Renomme et/ou déplace un dossier."""
-    f = s.get(Folder, folder_id) or _404("Dossier")
+    f = a.need_folder_edit(folder_id)
     if body.name is not None and not body.name.strip():
         raise HTTPException(400, "Nom de dossier vide")
     _check_sibling(s, body.parent_id if "parent_id" in body.model_fields_set else f.parent_id,
@@ -145,8 +179,7 @@ def update_folder(folder_id: int, body: FolderPatch, s=Depends(db)):
         f.name = body.name.strip()
     if "parent_id" in body.model_fields_set:
         if body.parent_id:
-            if not s.get(Folder, body.parent_id):
-                raise HTTPException(404, "Dossier de destination introuvable")
+            a.need_folder(body.parent_id)
             cur, seen = s.get(Folder, body.parent_id), set()
             while cur is not None and cur.id not in seen:  # on ne peut pas déplacer un dossier dans lui-même
                 if cur.id == folder_id:
@@ -160,15 +193,37 @@ def update_folder(folder_id: int, body: FolderPatch, s=Depends(db)):
 
 
 @app.delete("/api/folders/{folder_id}", dependencies=[Depends(auth.need("folders.manage"))])
-def delete_folder(folder_id: int, s=Depends(db)):
-    f = s.get(Folder, folder_id) or _404("Dossier")
+def delete_folder(folder_id: int, s=Depends(db), a: Access = Depends(acl)):
+    f = a.need_folder_edit(folder_id)
     if s.query(Folder).filter(Folder.parent_id == folder_id).count() or \
        s.query(Job).filter(Job.folder_id == folder_id).count():
         raise HTTPException(400, "Le dossier n'est pas vide (sous-dossiers ou traitements)")
+    s.query(FolderAccess).filter(FolderAccess.folder_id == folder_id).delete()
     s.delete(f)
     s.commit()
     r2sync.trigger()  # retire l'objet « dossier » devenu inutile sur R2
     return {"ok": True}
+
+
+class AccessIn(BaseModel):
+    user_ids: list[int]
+
+
+@app.get("/api/folders/{folder_id}/access", dependencies=[Depends(auth.need("admin"))])
+def get_folder_access(folder_id: int, s=Depends(db)):
+    s.get(Folder, folder_id) or _404("Dossier")
+    return {"user_ids": [r[0] for r in s.query(FolderAccess.user_id).filter(FolderAccess.folder_id == folder_id)]}
+
+
+@app.put("/api/folders/{folder_id}/access", dependencies=[Depends(auth.need("admin"))])
+def set_folder_access(folder_id: int, body: AccessIn, s=Depends(db)):
+    """Attribue un dossier à des utilisateurs : ils y travaillent (sous-dossiers compris) sans pouvoir le modifier."""
+    s.get(Folder, folder_id) or _404("Dossier")
+    ids = {u.id for u in s.query(User).filter(User.id.in_(body.user_ids), User.is_admin.is_(False))}
+    s.query(FolderAccess).filter(FolderAccess.folder_id == folder_id).delete()
+    s.add_all(FolderAccess(folder_id=folder_id, user_id=i) for i in ids)
+    s.commit()
+    return {"user_ids": sorted(ids)}
 
 
 class FolderIntro(BaseModel):
@@ -176,8 +231,8 @@ class FolderIntro(BaseModel):
 
 
 @app.put("/api/folders/{folder_id}/intro", dependencies=[Depends(auth.need("folders.manage"))])
-def set_folder_intro(folder_id: int, body: FolderIntro, s=Depends(db)):
-    f = s.get(Folder, folder_id) or _404("Dossier")
+def set_folder_intro(folder_id: int, body: FolderIntro, s=Depends(db), a: Access = Depends(acl)):
+    f = a.need_folder_edit(folder_id)
     if body.intro_id is not None and not s.get(Intro, body.intro_id):
         raise HTTPException(404, "Intro introuvable")
     f.intro_id = body.intro_id
@@ -298,40 +353,96 @@ def _times(start, end):
 
 
 @app.get("/api/folders/{folder_id}/jobs", dependencies=[Depends(auth.need("jobs.view"))])
-def list_jobs(folder_id: int, s=Depends(db)):
+def list_jobs(folder_id: int, s=Depends(db), a: Access = Depends(acl)):
+    a.need_folder(folder_id)
     jobs = (s.query(Job).filter(Job.folder_id == folder_id)
             .order_by(Job.date.desc(), Job.id.desc()).all())
-    return [job_dict(j, s=s) for j in jobs]
+    return [job_dict(j, s=s, a=a) for j in jobs]
 
 
-@app.post("/api/jobs", dependencies=[Depends(auth.need("jobs.create"))])
-def create_job(body: JobIn, request: Request, s=Depends(db)):
-    if not s.get(Folder, body.folder_id):
-        raise HTTPException(404, "Dossier introuvable")
-    url = body.youtube_url.strip()
-    if not url.startswith(("http://", "https://")):
-        raise HTTPException(400, "Lien YouTube invalide")
-    title = body.title.strip()
+def _job_fields(body_title, body_date, start, end, intro_id, s):
+    """Contrôles communs à la création depuis un lien et depuis un fichier."""
+    title = (body_title or "").strip()
     if not title:
         raise HTTPException(400, "Le nom est obligatoire")
-    day = body.date or date_cls.today().isoformat()
+    day = body_date or date_cls.today().isoformat()
     try:
         date_cls.fromisoformat(day)
     except ValueError:
         raise HTTPException(400, "Date invalide (AAAA-MM-JJ)")
-    start, end = _times(body.start, body.end)
-    _check_intro(s, body.intro_id)
+    start, end = _times(start, end)
+    _check_intro(s, intro_id)
+    return title, day, start, end
+
+
+@app.post("/api/jobs", dependencies=[Depends(auth.need("jobs.create"))])
+def create_job(body: JobIn, request: Request, s=Depends(db), a: Access = Depends(acl)):
+    a.need_folder(body.folder_id)
+    url = body.youtube_url.strip()
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "Lien YouTube invalide")
+    title, day, start, end = _job_fields(body.title, body.date, body.start, body.end, body.intro_id, s)
     job = Job(folder_id=body.folder_id, intro_id=body.intro_id, created_by=request.state.user.username, youtube_url=url, title=title, date=day,
               filename=f"{slugify(title)}_{day}", start_override=start, end_override=end)
     s.add(job)
     s.commit()
-    return job_dict(job, s=s)
+    return job_dict(job, s=s, a=a)
+
+
+@app.post("/api/jobs/upload", dependencies=[Depends(auth.need("jobs.create"))])
+def create_job_from_file(request: Request, file: UploadFile = File(...), folder_id: int = Form(...), title: str = Form(""),
+                         date: str = Form(""), start: str = Form(""), end: str = Form(""), intro_id: str = Form(""),
+                         s=Depends(db), a: Access = Depends(acl)):
+    """Traitement à partir d'un fichier audio/vidéo envoyé (au lieu d'un lien YouTube). Le fichier prend la place
+    de l'audio téléchargé : même traitement ensuite. Le traitement n'est créé qu'une fois le fichier complet et lisible."""
+    a.need_folder(folder_id)
+    name = Path(file.filename or "").name
+    ext = Path(name).suffix.lower()
+    if ext not in UPLOAD_EXT:
+        raise HTTPException(400, "Format non pris en charge (MP3, M4A, WAV, MP4, MKV, MOV, WEBM…)")
+    try:
+        intro = None if intro_id == "" else int(intro_id)
+    except ValueError:
+        raise HTTPException(400, "Intro invalide")
+    title, day, start_s, end_s = _job_fields(title or Path(name).stem, date, start, end, intro, s)
+    tmp = config.CACHE_DIR / f"upload-{secrets.token_hex(6)}"
+    final = None
+    try:
+        tmp.mkdir(parents=True)
+        dest, written, limit = tmp / f"source{ext}", 0, config.MAX_UPLOAD_MB * 1024 * 1024
+        with open(dest, "wb") as out:
+            while chunk := file.file.read(1024 * 1024):
+                written += len(chunk)
+                if written > limit:
+                    raise HTTPException(413, f"Fichier trop volumineux (maximum {config.MAX_UPLOAD_MB} Mo)")
+                out.write(chunk)
+        try:
+            audio.probe_duration(dest)
+        except Exception:
+            raise HTTPException(400, "Ce fichier n'est pas un audio ou une vidéo lisible")
+        job = Job(folder_id=folder_id, intro_id=intro, created_by=request.state.user.username,
+                  youtube_url=f"{UPLOAD_SCHEME}{name}", video_title=Path(name).stem, title=title, date=day,
+                  filename=f"{slugify(title)}_{day}", start_override=start_s, end_override=end_s)
+        s.add(job)
+        s.flush()  # id du traitement, sans le rendre visible au worker avant que le fichier soit en place
+        final = config.CACHE_DIR / str(job.id)
+        shutil.rmtree(final, ignore_errors=True)
+        tmp.replace(final)
+        (final / "ok").touch()
+        s.commit()
+    except BaseException:
+        s.rollback()
+        shutil.rmtree(tmp, ignore_errors=True)
+        if final is not None:
+            shutil.rmtree(final, ignore_errors=True)
+        raise
+    return job_dict(job, s=s, a=a)
 
 
 @app.get("/api/jobs", dependencies=[Depends(auth.need("jobs.view"))])
-def history(q: str = "", status: str = "", limit: int = 50, offset: int = 0, s=Depends(db)):
+def history(q: str = "", status: str = "", limit: int = 50, offset: int = 0, s=Depends(db), a: Access = Depends(acl)):
     """Historique de tous les traitements, tous dossiers confondus (le plus récent d'abord)."""
-    query = s.query(Job)
+    query = a.jobs(s.query(Job))
     if status == "active":
         query = query.filter(Job.status.in_(["pending", "running"]))
     elif status in ("done", "error"):
@@ -343,21 +454,22 @@ def history(q: str = "", status: str = "", limit: int = 50, offset: int = 0, s=D
     total = query.count()
     jobs = (query.order_by(Job.created_at.desc(), Job.id.desc())
             .offset(max(offset, 0)).limit(min(max(limit, 1), 200)).all())
-    return {"total": total, "items": [job_dict(j, s=s) for j in jobs]}
+    return {"total": total, "items": [job_dict(j, s=s, a=a) for j in jobs]}
 
 
 @app.get("/api/jobs/{job_id}", dependencies=[Depends(auth.need("jobs.view"))])
-def get_job(job_id: int, s=Depends(db)):
-    job = s.get(Job, job_id) or _404("Traitement")
-    d = job_dict(job, with_log=True, s=s)
+def get_job(job_id: int, s=Depends(db), a: Access = Depends(acl)):
+    job = a.need_job(s, job_id)
+    d = job_dict(job, with_log=True, s=s, a=a)
     # Liens directs R2 (publics si R2_PUBLIC_BASE_URL, sinon signés et limités dans le temps)
     d["links"] = {}
     if storage.enabled():
         if job.r2_key_mp3:
             d["links"]["mp3"] = storage.link(job.r2_key_mp3)
-    d["intro_name"] = ("Aucune" if job.intro_id == 0 else
-                       (s.get(Intro, job.intro_id).name if job.intro_id and s.get(Intro, job.intro_id)
-                        else "Automatique (dossier ou par défaut)"))
+    if a.admin:
+        d["intro_name"] = ("Aucune" if job.intro_id == 0 else
+                           (s.get(Intro, job.intro_id).name if job.intro_id and s.get(Intro, job.intro_id)
+                            else "Automatique (dossier ou par défaut)"))
     d["links_public"] = bool(config.R2_PUBLIC_BASE_URL)
     d["links_days"] = max(config.R2_LINK_EXPIRES // 86400, 1)
     return d
@@ -368,15 +480,14 @@ class MoveIn(BaseModel):
 
 
 @app.post("/api/jobs/{job_id}/move", dependencies=[Depends(auth.need("folders.manage"))])
-def move_job(job_id: int, body: MoveIn, s=Depends(db)):
+def move_job(job_id: int, body: MoveIn, s=Depends(db), a: Access = Depends(acl)):
     """Déplace un traitement dans un autre dossier (les fichiers déjà envoyés sur R2 ne changent pas de nom)."""
-    job = s.get(Job, job_id) or _404("Traitement")
-    if not s.get(Folder, body.folder_id):
-        raise HTTPException(404, "Dossier de destination introuvable")
+    job = a.need_job(s, job_id, edit=True)
+    a.need_folder(body.folder_id)
     job.folder_id = body.folder_id
     s.commit()
     r2sync.trigger()
-    return job_dict(job, s=s)
+    return job_dict(job, s=s, a=a)
 
 
 class JobRename(BaseModel):
@@ -384,21 +495,27 @@ class JobRename(BaseModel):
 
 
 @app.patch("/api/jobs/{job_id}", dependencies=[Depends(auth.need("folders.manage"))])
-def rename_job(job_id: int, body: JobRename, s=Depends(db)):
-    """Renomme un podcast : le fichier est aussi renommé sur R2."""
-    job = s.get(Job, job_id) or _404("Traitement")
+def rename_job(job_id: int, body: JobRename, s=Depends(db), a: Access = Depends(acl)):
+    """Renomme un podcast, même pendant son traitement : nom affiché, nom du fichier local et fichier R2 suivent."""
+    job = a.need_job(s, job_id, edit=True)
     title = body.title.strip()
     if not title:
         raise HTTPException(400, "Le nom est obligatoire")
     job.title = title
+    job.filename = f"{slugify(title)}_{job.date}"
+    if job.local_mp3 and Path(job.local_mp3).exists():  # déjà encodé : on renomme aussi le fichier local
+        target = Path(job.local_mp3).with_name(f"{job.filename}.mp3")
+        if target != Path(job.local_mp3):
+            Path(job.local_mp3).replace(target)
+            job.local_mp3 = str(target)
     s.commit()
     r2sync.trigger()
-    return job_dict(job, s=s)
+    return job_dict(job, s=s, a=a)
 
 
 @app.post("/api/jobs/{job_id}/retry", dependencies=[Depends(auth.need("jobs.create"))])
-def retry_job(job_id: int, body: RetryIn, s=Depends(db)):
-    job = s.get(Job, job_id) or _404("Traitement")
+def retry_job(job_id: int, body: RetryIn, s=Depends(db), a: Access = Depends(acl)):
+    job = a.need_job(s, job_id, edit=True)
     if job.status == "running":
         raise HTTPException(400, "Traitement en cours")
     job.start_override, job.end_override = _times(body.start, body.end)
@@ -409,12 +526,12 @@ def retry_job(job_id: int, body: RetryIn, s=Depends(db)):
     job.updated_at = datetime.utcnow()  # repart en fin de file
     job.log = (job.log or "") + f"\n--- Relancé le {datetime.now():%d/%m/%Y %H:%M} ---\n"
     s.commit()
-    return job_dict(job, s=s)
+    return job_dict(job, s=s, a=a)
 
 
 @app.delete("/api/jobs/{job_id}", dependencies=[Depends(auth.need("jobs.delete"))])
-def delete_job(job_id: int, s=Depends(db)):
-    job = s.get(Job, job_id) or _404("Traitement")
+def delete_job(job_id: int, s=Depends(db), a: Access = Depends(acl)):
+    job = a.need_job(s, job_id, edit=True)
     if job.status == "running":
         raise HTTPException(400, "Impossible de supprimer un traitement en cours")
     try:
@@ -429,8 +546,8 @@ def delete_job(job_id: int, s=Depends(db)):
 
 
 @app.get("/api/jobs/{job_id}/file/{fmt}", dependencies=[Depends(auth.need("jobs.view"))])
-def job_file(job_id: int, fmt: str, download: bool = False, s=Depends(db)):
-    job = s.get(Job, job_id) or _404("Traitement")
+def job_file(job_id: int, fmt: str, download: bool = False, s=Depends(db), a: Access = Depends(acl)):
+    job = a.need_job(s, job_id)
     path = job.local_mp3 if fmt == "mp3" else None
     if not path or not Path(path).exists():
         raise HTTPException(404, "Fichier indisponible")
@@ -459,17 +576,17 @@ def _publish_new_audio(s, job: Job, new_file: Path) -> None:
     s.commit()
 
 
-def _done_job(s, job_id: int) -> Job:
-    job = s.get(Job, job_id) or _404("Traitement")
+def _done_job(s, job_id: int, a: Access) -> Job:
+    job = a.need_job(s, job_id, edit=True)
     if job.status != "done" or not job.local_mp3 or not Path(job.local_mp3).exists():
         raise HTTPException(400, "Seul un podcast terminé peut être rogné")
     return job
 
 
 @app.post("/api/jobs/{job_id}/trim", dependencies=[Depends(auth.need("jobs.trim"))])
-def trim_job(job_id: int, body: TrimIn, s=Depends(db)):
+def trim_job(job_id: int, body: TrimIn, s=Depends(db), a: Access = Depends(acl)):
     """Rogne le début et/ou la fin du podcast terminé, sans réencodage. L'original est gardé pour pouvoir revenir."""
-    job = _done_job(s, job_id)
+    job = _done_job(s, job_id, a)
     start, end = _times(body.start, body.end)
     cur = Path(job.local_mp3)
     duration = audio.probe_duration(cur)
@@ -488,12 +605,12 @@ def trim_job(job_id: int, body: TrimIn, s=Depends(db)):
         tmp.unlink(missing_ok=True)
         raise HTTPException(500, f"Rognage impossible : {exc}")
     _publish_new_audio(s, job, tmp)
-    return job_dict(job, s=s)
+    return job_dict(job, s=s, a=a)
 
 
 @app.post("/api/jobs/{job_id}/trim/reset", dependencies=[Depends(auth.need("jobs.trim"))])
-def reset_trim(job_id: int, s=Depends(db)):
-    job = _done_job(s, job_id)
+def reset_trim(job_id: int, s=Depends(db), a: Access = Depends(acl)):
+    job = _done_job(s, job_id, a)
     cur = Path(job.local_mp3)
     original = cur.with_name("original.mp3")
     if not original.exists():
@@ -502,12 +619,12 @@ def reset_trim(job_id: int, s=Depends(db)):
     shutil.copy2(original, tmp)
     _publish_new_audio(s, job, tmp)
     original.unlink(missing_ok=True)
-    return job_dict(job, s=s)
+    return job_dict(job, s=s, a=a)
 
 
 @app.get("/api/jobs/{job_id}/link/{fmt}", dependencies=[Depends(auth.need("jobs.view"))])
-def job_link(job_id: int, fmt: str, s=Depends(db)):
-    job = s.get(Job, job_id) or _404("Traitement")
+def job_link(job_id: int, fmt: str, s=Depends(db), a: Access = Depends(acl)):
+    job = a.need_job(s, job_id)
     key = job.r2_key_mp3 if fmt == "mp3" else None
     if not key or not storage.enabled():
         raise HTTPException(404, "Fichier absent de R2")
@@ -515,14 +632,15 @@ def job_link(job_id: int, fmt: str, s=Depends(db)):
 
 
 @app.get("/api/status", dependencies=[Depends(auth.need("jobs.view"))])
-def status(s=Depends(db)):
-    count = lambda st: s.query(Job).filter(Job.status == st).count()
+def status(s=Depends(db), a: Access = Depends(acl)):
+    count = lambda st: a.jobs(s.query(Job)).filter(Job.status == st).count()
     return {
         "r2": storage.enabled(),
         "llm": config.LLM_PROVIDER if config.LLM_PROVIDER in ("anthropic", "openai") else None,
         "running": count("running"), "pending": count("pending"),
         "r2_sync": r2sync.status(),
         "max_parallel": get_max_parallel(s), "max_parallel_limit": MAX_PARALLEL_LIMIT,
+        "max_upload_mb": config.MAX_UPLOAD_MB,
     }
 
 
@@ -570,6 +688,7 @@ class UserIn(BaseModel):
     password: str
     is_admin: bool = False
     permissions: list[str] = []
+    max_parallel: int = 5
 
 
 class UserPatch(BaseModel):
@@ -578,6 +697,13 @@ class UserPatch(BaseModel):
     is_admin: bool | None = None
     is_active: bool | None = None
     permissions: list[str] | None = None
+    max_parallel: int | None = None
+
+
+def _check_quota(n: int) -> int:
+    if not 1 <= n <= MAX_PARALLEL_LIMIT:
+        raise HTTPException(400, f"Traitements simultanés : entre 1 et {MAX_PARALLEL_LIMIT}")
+    return n
 
 
 def _clean_perms(perms: list[str]) -> str:
@@ -648,7 +774,7 @@ def create_user(body: UserIn, s=Depends(db)):
     if s.query(User).filter(User.username == name).first():
         raise HTTPException(400, "Cet identifiant existe déjà")
     auth.check_password_strength(body.password)
-    user = User(username=name, display_name=body.display_name.strip(), is_admin=body.is_admin,
+    user = User(username=name, max_parallel=_check_quota(body.max_parallel), display_name=body.display_name.strip(), is_admin=body.is_admin,
                 permissions=_clean_perms(body.permissions), password_hash=auth.hash_password(body.password))
     s.add(user)
     s.commit()
@@ -677,6 +803,8 @@ def update_user(user_id: int, body: UserPatch, request: Request, s=Depends(db),
         user.is_admin = body.is_admin
     if body.permissions is not None:
         user.permissions = _clean_perms(body.permissions)
+    if body.max_parallel is not None:
+        user.max_parallel = _check_quota(body.max_parallel)
     if body.password:
         auth.check_password_strength(body.password)
         user.password_hash = auth.hash_password(body.password)
@@ -699,6 +827,7 @@ def delete_user(user_id: int, request: Request, s=Depends(db), _=Depends(auth.ne
     if user.is_admin and not _other_active_admins(s, user_id):
         raise HTTPException(400, "Il doit rester au moins un administrateur actif")
     auth.drop_sessions(s, user_id)
+    s.query(FolderAccess).filter(FolderAccess.user_id == user_id).delete()
     s.delete(user)
     s.commit()
     return {"ok": True}

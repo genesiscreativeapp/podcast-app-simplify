@@ -145,6 +145,20 @@ def render(audio: np.ndarray, sr: int, keep: list[tuple[float, float]], xfade_ms
     return out[:pos]
 
 
+def sentence_end(words: list[dict], nominal: float, horizon: float, min_gap: float = 0.6) -> float:
+    """Instant (s) où couper la fin : la première fin de phrase ou pause d'au moins min_gap s à partir de `nominal`
+    (2 s plus tôt toléré), dans les `horizon` s qui suivent. Sinon `nominal`. Évite de couper une phrase en plein milieu."""
+    for i, w in enumerate(words):
+        if w["end"] < nominal - 2:
+            continue
+        if w["end"] > nominal + horizon:
+            break
+        pause = (words[i + 1]["start"] - w["end"]) if i + 1 < len(words) else float("inf")
+        if pause >= min_gap or w["word"].strip()[-1:] in ".!?…":
+            return w["end"] + 0.25
+    return nominal
+
+
 def edit_file(src, dst, words: list[dict], max_pause: float, target_pause: float,
               remove_fillers: bool = True, remove_repeats: bool = True,
               extra_cuts: list[tuple[float, float]] = (), repeat_gap: float = 1.0, repeat_words: int = 8) -> dict:

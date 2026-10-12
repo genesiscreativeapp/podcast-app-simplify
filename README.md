@@ -69,6 +69,8 @@ Bouton **Rogner** sur un podcast terminé : on écoute, on place le curseur et �
 - **Sans LLM** : une heuristique retient la plus longue zone de parole dense. La louange chantée a un débit de mots plus faible et les annonces sont courtes. Cela fonctionne bien quand le culte est classique, moins bien avec un long temps de prière parlée.
 - **Bornes manuelles** : si vous les saisissez, l'étape de repérage est sautée et le traitement est bien plus rapide.
 
+**Fin du podcast.** Le podcast se termine par un **fondu de sortie** (`FADE_OUT`, 2,5 s ; 0 = coupure nette). Sans IA, la fin repérée est recalée sur la fin de phrase la plus proche (jusqu'à `END_MARGIN`, 25 s, lues au-delà), pour ne plus couper un mot ou une phrase en plein milieu. Avec l'IA, la fin donnée par le modèle inclut la ligne de 30 s citée, et le retrait précis des annonces fait le reste. **Si l'IA ne répond pas** (crédit épuisé, clé refusée…), le journal du traitement l'indique avec le motif de l'API et on retombe sur l'heuristique : la fin est alors moins fiable.
+
 ## Adoration, témoignages, annonces
 
 Avec une IA configurée (`LLM_PROVIDER`), le traitement est prudent à deux niveaux :
@@ -86,6 +88,7 @@ Le bilan (passages retirés, avec leurs horaires) est visible dans les détails 
 | « euh », « hum » | Horodatages mot à mot de Whisper | `REMOVE_FILLERS` |
 | Mots et phrases répétés (« la foi, la foi », « Dieu est bon, Dieu est bon ») | Répétitions **immédiates** (pause < `REPEAT_MAX_GAP`, jusqu'à `REPEAT_MAX_WORDS` mots) ; la dernière copie est gardée | `REMOVE_REPEATS` |
 | Volume | Normalisation à -16 LUFS (standard podcast) | — |
+| Fin | Fondu de sortie ; coupure sur une fin de phrase | `FADE_OUT`, `END_MARGIN` |
 
 Les mots comme « amen » ou « alléluia » répétés seuls sont préservés. Whisper est amorcé (`WHISPER_PROMPT`) pour transcrire aussi les « euh » et répétitions. Pour une voix moins métallique : `DENOISE_DB` (réduction de bruit, 0 = aucune).
 
@@ -99,6 +102,16 @@ Le traitement est optimisé pour les cultes de 4 h 30 et plus :
 
 Pour aller plus vite : saisir les bornes (le repérage disparaît), `DETECT_CLIP=10`. Pour plus de précision : `WHISPER_MODEL_DETECT=base`, `WHISPER_BEAM_EDIT=5`, `YTDLP_FORMAT=bestaudio/best`.
 Plusieurs traitements peuvent tourner en même temps (réglage **Parallèle** en haut de l'interface, 1 à 20, `MAX_PARALLEL_JOBS` au démarrage). Les autres attendent en file, affichés « n° 1, n° 2… », et le suivant démarre dès qu'une place se libère. Ils partagent les mêmes cœurs et les mêmes modèles Whisper : le gain vient surtout du chevauchement des étapes (téléchargement, ffmpeg, envoi) avec la transcription ; au-delà de 2-3, chacun va plus lentement. Chaque traitement garde l'audio de sa prédication en mémoire : surveillez la RAM avant d'augmenter le parallélisme.
+
+**Quota par utilisateur** : chaque compte a un nombre maximal de traitements simultanés (5 par défaut). Seul un administrateur le modifie, dans *Utilisateurs → Modifier*. Au-delà, les traitements de cet utilisateur restent en file sans bloquer ceux des autres ; le réglage global **Parallèle** reste le plafond du serveur.
+
+**Dossiers : propriétaire et attribution.** Chaque dossier garde le compte qui l'a créé. Un utilisateur voit ses propres dossiers et ceux que l'administrateur lui a **attribués** (clic droit sur un dossier → *Attribuer à des utilisateurs…*, sous-dossiers compris). Dans un dossier attribué il lance des traitements, écoute et télécharge, mais il ne peut **ni renommer, ni déplacer, ni supprimer** le dossier ni ce qui a été créé par un autre compte ; il garde la main sur ce qu'il y crée lui-même. Un dossier non attribué lui est invisible (accueil, historique et statistiques compris). Les dossiers et traitements existants avant cette version appartiennent à l'administration : les utilisateurs non administrateurs ne les voient qu'une fois les dossiers attribués.
+
+**Fichier envoyé au lieu d'un lien YouTube.** Dans *Nouveau traitement*, l'onglet *Fichier audio / vidéo* envoie un MP3, M4A, WAV, MP4, MKV… (`MAX_UPLOAD_MB`, 4096 par défaut). Le fichier remplace l'audio téléchargé, le reste du traitement est identique. Il est conservé dans le cache (`KEEP_SOURCES`) : s'il en est retiré, un « Relancer » demande de le renvoyer.
+
+**Renommage pendant un traitement.** Le nom affiché, le nom du fichier, l'étiquette ID3 et le fichier R2 suivent, même si le traitement est en cours.
+
+**Thème.** Bouton clair / sombre dans la barre du haut (par défaut : celui du système, choix mémorisé dans le navigateur).
 
 ## Taille des fichiers
 

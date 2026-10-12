@@ -76,16 +76,19 @@ LOUDNORM = "loudnorm=I=-16:TP=-1.5:LRA=11"  # standard podcast
 
 def finalize(body: Path, out: Path, intro: Path | None = None, xfade: float = 0.6,
              on_progress: Callable[[float], None] | None = None) -> None:
-    """Normalise le volume (-16 LUFS) et ajoute l'intro avec un fondu enchaîné."""
+    """Normalise le volume (-16 LUFS), ajoute l'intro avec un fondu enchaîné et termine par un fondu de sortie."""
     norm = f"aresample={SR},aformat=channel_layouts=mono,{LOUDNORM},aresample={SR}"
+    body_len = probe_duration(body)
+    fade = min(config.FADE_OUT, body_len / 2)  # la fin ne s'arrête pas net
+    fade_out = f",afade=t=out:st={body_len - fade:.3f}:d={fade:.3f}" if fade > 0 else ""
     if intro:
-        fc = (f"[0:a]{norm}[i];[1:a]{norm}[b];"
+        fc = (f"[0:a]{norm}[i];[1:a]{norm}{fade_out}[b];"
               f"[i][b]acrossfade=d={xfade}:c1=tri:c2=tri[out]")
         cmd = ["ffmpeg", "-y", "-hide_banner", "-i", str(intro), "-i", str(body),
                "-filter_complex", fc, "-map", "[out]"]
     else:
-        cmd = ["ffmpeg", "-y", "-hide_banner", "-i", str(body), "-af", norm]
-    total = probe_duration(body) + (probe_duration(intro) - xfade if intro else 0)
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-i", str(body), "-af", f"{norm},afade=t=in:d=0.3{fade_out}"]
+    total = body_len + (probe_duration(intro) - xfade if intro else 0)
     run(cmd + ["-ac", "1", "-ar", str(SR), "-c:a", "pcm_s16le", str(out)], total, on_progress)
 
 

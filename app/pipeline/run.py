@@ -11,7 +11,7 @@ from ..utils import fmt_time
 from . import audio, steps
 from .detect import detect_sermon
 from .download import download
-from .edit import edit_file
+from .edit import edit_file, sentence_end
 from .offtopic import find_offtopic
 from .transcribe import transcribe_sampled, transcribe_words
 
@@ -81,7 +81,10 @@ def run_job(job_id: int) -> None:
         if (cache / "ok").exists() and cached:
             src, video_title = cached[0], known_title
             cache.touch()  # le garde parmi les plus récents lors du nettoyage du cache
-            rep.log("Audio YouTube déjà en cache, téléchargement évité")
+            rep.log("Fichier envoyé par l'utilisateur" if url.startswith(config.UPLOAD_SCHEME)
+                    else "Audio YouTube déjà en cache, téléchargement évité")
+        elif url.startswith(config.UPLOAD_SCHEME):
+            raise RuntimeError("Le fichier envoyé n'est plus conservé sur le serveur : renvoyez-le pour relancer le traitement.")
         else:
             rep.step("download")
             shutil.rmtree(cache, ignore_errors=True)
@@ -115,7 +118,8 @@ def run_job(job_id: int) -> None:
         offtopic_on = config.REMOVE_OFFTOPIC and config.LLM_PROVIDER in ("anthropic", "openai")
         auto = start_ov is None and end_ov is None
         pad_b = min(config.OFFTOPIC_PAD_BEFORE, start) if offtopic_on and auto else 0.0
-        pad_a = min(config.OFFTOPIC_PAD_AFTER, duration - end) if offtopic_on and auto else 0.0
+        # sans IA : petite marge seulement, pour pouvoir finir sur une fin de phrase plutôt qu'en plein mot
+        pad_a = min(config.OFFTOPIC_PAD_AFTER if offtopic_on else config.END_MARGIN, duration - end) if auto else 0.0
         win_start, win_end = start - pad_b, end + pad_a
 
         # 3b. Extraction + amélioration de la voix (un seul passage ffmpeg)
@@ -130,6 +134,11 @@ def run_job(job_id: int) -> None:
         segs = transcribe_words(clean16, win_end - win_start, rep.sub("words"))
         clean16.unlink(missing_ok=True)
         words = [w for s in segs for w in s["words"]]
+        total = win_end - win_start
+        tail_cut = []  # fin repérée recalée sur une fin de phrase ; ce qui suit est retiré
+        if pad_a:
+            cut_at = sentence_end(words, total - pad_a, pad_a)
+            tail_cut = [(cut_at, total)]
 
         # 3c'. Retrait des témoignages, annonces, chants... (IA)
         extra_cuts, offtopic_note = [], ""
@@ -138,13 +147,13 @@ def run_job(job_id: int) -> None:
             extra_cuts, offtopic_note, ok = find_offtopic(segs, rep.log)
             if not ok and (pad_b or pad_a):
                 # l'IA n'a pas répondu : on revient exactement aux bornes repérées, sans la marge
-                total = win_end - win_start
-                extra_cuts = [(0.0, pad_b), (total - pad_a, total)]
+                extra_cuts = [(0.0, pad_b), *(tail_cut or [(total - pad_a, total)])]
                 offtopic_note = "IA indisponible : marge retirée, adoration et annonces éventuelles conservées"
                 rep.log(offtopic_note)
             elif offtopic_note:
                 rep.log(offtopic_note)
         else:
+            extra_cuts = tail_cut
             rep.log("Pas d'IA configurée : témoignages et annonces non retirés")
 
         # 3d. Montage : silences, « euh », répétitions
@@ -169,8 +178,11 @@ def run_job(job_id: int) -> None:
         rep.log(f"Intro : {intro[1]}" if intro else "Aucune intro : podcast sans intro")
         audio.finalize(edited, master, intro_path, on_progress=rep.sub("master"))
 
-        # 6. Compression
+        # 6. Compression — le nom a pu être modifié pendant le traitement : on relit celui de la base
         rep.step("encode")
+        with SessionLocal() as s2:
+            cur = s2.get(Job, job_id)
+            title, filename = cur.title, cur.filename
         out_dir = config.OUTPUT_DIR / str(job_id)
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "original.mp3").unlink(missing_ok=True)  # copie d'avant un ancien rognage
@@ -215,7 +227,8 @@ def _prune_cache() -> None:
     """Ne garde que les audios YouTube des derniers traitements (ils pèsent 100 à 250 Mo).
     Ne touche jamais à celui d'un traitement en cours (plusieurs tournent en parallèle)."""
     with SessionLocal() as s:
-        busy = {str(i) for (i,) in s.query(Job.id).filter(Job.status == "running")}
+        busy = {str(i) for (i,) in s.query(Job.id).filter(
+            (Job.status == "running") | ((Job.status == "pending") & Job.youtube_url.startswith(config.UPLOAD_SCHEME)))}
     dirs = sorted((d for d in config.CACHE_DIR.iterdir() if d.is_dir() and d.name not in busy),
                   key=lambda d: d.stat().st_mtime, reverse=True)
     for d in dirs[config.KEEP_SOURCES:]:

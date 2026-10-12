@@ -2,9 +2,10 @@
 import logging
 import signal
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
-from .db import MAX_PARALLEL_LIMIT, QUEUE_ORDER, Job, SessionLocal, get_max_parallel, init_db
+from .db import MAX_PARALLEL_LIMIT, QUEUE_ORDER, Job, SessionLocal, User, get_max_parallel, init_db
 from .pipeline.run import run_job
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -19,9 +20,14 @@ def _handle_stop(*_):
 
 
 def claim_next() -> int | None:
-    """Prend le plus ancien traitement en attente. Le UPDATE conditionnel évite qu'il soit pris deux fois."""
+    """Prend le plus ancien traitement en attente dont l'auteur n'a pas atteint son quota de traitements simultanés.
+    Le UPDATE conditionnel évite qu'il soit pris deux fois."""
     with SessionLocal() as s:
-        for (job_id,) in s.query(Job.id).filter(Job.status == "pending").order_by(*QUEUE_ORDER).limit(5).all():
+        quota = dict(s.query(User.username, User.max_parallel).all())
+        running = Counter(o for (o,) in s.query(Job.created_by).filter(Job.status == "running"))
+        for job_id, owner in s.query(Job.id, Job.created_by).filter(Job.status == "pending").order_by(*QUEUE_ORDER).all():
+            if owner in quota and running[owner] >= (quota[owner] or 1):
+                continue  # reste en file jusqu'à la fin d'un de ses traitements
             claimed = (s.query(Job).filter(Job.id == job_id, Job.status == "pending")
                        .update({"status": "running", "step": "Démarrage", "progress": 0.0}))
             s.commit()

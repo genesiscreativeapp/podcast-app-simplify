@@ -42,6 +42,7 @@ class User(Base):
     permissions: Mapped[str] = mapped_column(Text, default="")  # clés séparées par des virgules
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     last_login: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    max_parallel: Mapped[int] = mapped_column(Integer, default=5)  # traitements simultanés de cet utilisateur ; réglé par un admin
 
     @property
     def perms(self) -> set[str]:
@@ -87,7 +88,15 @@ class Folder(Base):
     name: Mapped[str] = mapped_column(String(200))
     parent_id: Mapped[int | None] = mapped_column(ForeignKey("folders.id"), nullable=True)
     intro_id: Mapped[int | None] = mapped_column(nullable=True)  # intro de la bibliothèque (sinon : parent)
+    created_by: Mapped[str | None] = mapped_column(String(60), nullable=True)  # NULL = créé par l'administration
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class FolderAccess(Base):
+    """Dossier de l'administration attribué à un utilisateur (il peut y travailler, sans le modifier)."""
+    __tablename__ = "folder_access"
+    folder_id: Mapped[int] = mapped_column(ForeignKey("folders.id", ondelete="CASCADE"), primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
 
 
 class Job(Base):
@@ -149,7 +158,8 @@ def _init_db() -> None:
     with engine.begin() as conn:
         for table, col, sql_type in (("jobs", "intro_id", "INTEGER"), ("folders", "intro_id", "INTEGER"),
                                      ("jobs", "edit_note", "TEXT"), ("jobs", "created_by", "VARCHAR(60)"),
-                                     ("users", "is_system", "BOOLEAN DEFAULT 0")):
+                                     ("users", "is_system", "BOOLEAN DEFAULT 0"), ("users", "max_parallel", "INTEGER DEFAULT 5"),
+                                     ("folders", "created_by", "VARCHAR(60)")):
             cols = {r[1] for r in conn.execute(text(f"PRAGMA table_info({table})"))}
             if col not in cols:
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {sql_type}"))

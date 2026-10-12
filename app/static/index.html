@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Studio Podcast</title>
+  <script>try { var t = localStorage.getItem("theme"); if (t === "dark" || t === "light") document.documentElement.dataset.theme = t; } catch (e) {}</script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css">
@@ -13,6 +14,7 @@
 
   <!-- ===== Connexion ===== -->
   <main id="loginScreen" class="login-screen" hidden>
+    <button class="icon-btn theme-btn login-theme" data-theme-toggle type="button" aria-label="Changer de thème"></button>
     <form id="loginForm" class="login-card" autocomplete="on">
       <div class="login-logo"><span data-ic="mic"></span></div>
       <h1>Studio Podcast</h1>
@@ -36,6 +38,7 @@
       <div class="status" id="statusBar"></div>
       <label class="parallel" id="parallelBox" title="Nombre de traitements menés en même temps ; les autres attendent en file" hidden>Parallèle
         <select id="parallelSelect"></select></label>
+      <button class="icon-btn theme-btn" data-theme-toggle type="button" aria-label="Changer de thème"></button>
       <div class="user-menu">
         <button class="user-btn" id="userBtn"><span class="avatar" id="userAvatar"></span><span id="userName"></span></button>
         <div class="menu" id="userMenu" hidden>
@@ -49,7 +52,7 @@
       <aside class="sidebar" id="sidebar">
         <nav class="nav">
           <button class="nav-link" data-nav="home"><span data-ic="home"></span> Accueil</button>
-          <button class="nav-link" data-nav="folders"><span data-ic="folder"></span> Dossiers</button>
+          <button class="nav-link" data-nav="folders"><span data-ic="folder"></span> Dossiers <span class="nav-badge" id="navFoldersBadge" hidden></span></button>
           <button class="nav-link" data-nav="history"><span data-ic="history"></span> Historique</button>
           <button class="nav-link" data-nav="intros"><span data-ic="music"></span> Bibliothèque d'intros</button>
           <button class="nav-link" data-nav="users" id="navUsers" hidden><span data-ic="users"></span> Utilisateurs</button>
@@ -73,7 +76,7 @@
               <div class="stats-grid" id="homeStats"></div>
               <div id="homeActiveBox" hidden>
                 <h3 class="section-title">En cours et en file d'attente <span class="count" id="homeActiveCount"></span></h3>
-                <div id="homeActive" class="jobs"></div>
+                <div id="homeActive" class="active-grid"></div>
               </div>
               <div class="section-head">
                 <h3 class="section-title">Podcasts <span class="count" id="homeDoneCount"></span></h3>
@@ -146,10 +149,26 @@
             <div class="card" id="newJobPanel" hidden>
               <div class="panel-head"><h3>Nouveau traitement dans <span id="newJobWhere"></span></h3>
                 <button class="icon-btn" id="newJobClose" aria-label="Fermer">✕</button></div>
-              <form id="jobForm" class="job-form">
-                <label class="full">Lien YouTube
+              <div class="mode-switch" role="tablist" aria-label="Type de traitement">
+                <button type="button" class="active" data-mode="single" role="tab"><span data-ic="play"></span> Traitement individuel</button>
+                <button type="button" data-mode="batch" role="tab"><span data-ic="list"></span> Traitement par lot <span class="count" id="batchCount"></span></button>
+              </div>
+
+              <!-- Traitement individuel : un lien ou un fichier -->
+              <form id="jobForm" class="job-form" data-panel="single">
+                <div class="source-switch full" role="group" aria-label="Source du podcast">
+                  <button type="button" class="active" data-source="url"><span data-ic="link"></span> Lien YouTube</button>
+                  <button type="button" data-source="file"><span data-ic="upload"></span> Fichier audio / vidéo</button>
+                </div>
+                <label class="full" data-src="url">Lien YouTube
                   <input name="youtube_url" type="url" required placeholder="https://www.youtube.com/watch?v=…">
                 </label>
+                <div class="full dropzone" id="dropzone" data-src="file" hidden>
+                  <span class="dz-ic" data-ic="upload"></span>
+                  <b id="dropName">Glissez un fichier ici ou cliquez pour le choisir</b>
+                  <span class="hint" id="dropHint">MP3, M4A, WAV, MP4, MKV, MOV, WEBM… (jusqu'à <span id="maxUpload">4 Go</span>)</span>
+                  <input type="file" name="file" id="jobFile" accept="audio/*,video/*,.mkv,.m4a,.aac,.opus,.flac">
+                </div>
                 <label>Nom
                   <input name="title" required placeholder="La foi qui déplace les montagnes">
                 </label>
@@ -168,31 +187,39 @@
                   </div>
                   <p class="hint">Laisser vide pour une détection automatique. Renseigner ces champs évite l'étape de repérage (plus rapide).</p>
                 </details>
-                <details class="full" id="batchBox">
-                  <summary>Ajouter plusieurs liens d'un coup <span class="count" id="batchCount"></span></summary>
-                  <div class="batch">
-                    <p class="hint">Préparez votre liste, modifiez ou retirez des lignes, puis lancez le tout : les traitements partent dans la file d'attente, avec l'intro choisie plus haut. La liste est conservée si vous quittez la page.</p>
-                    <div class="batch-add">
-                      <input id="batchUrl" type="url" placeholder="Lien YouTube" autocomplete="off">
-                      <input id="batchTitle" placeholder="Nom du podcast" autocomplete="off">
-                      <input id="batchDate" type="date">
-                      <button class="btn" type="button" id="batchAddBtn"><span data-ic="plus"></span> Ajouter</button>
-                    </div>
-                    <div id="batchList" class="batch-list"></div>
-                    <div class="batch-foot">
-                      <div class="actions">
-                        <button class="btn small ghost" type="button" id="batchPasteBtn"><span data-ic="list"></span> Coller une liste</button>
-                        <button class="btn small ghost danger" type="button" id="batchClearBtn"><span data-ic="trash"></span> Tout vider</button>
-                      </div>
-                      <button class="btn" type="button" id="batchRunBtn"><span data-ic="play"></span> <span id="batchRunLabel">Lancer</span></button>
-                    </div>
-                  </div>
-                </details>
+                <div class="upload-progress" id="uploadProgress" hidden>
+                  <div class="progress"><div id="uploadBar" style="width:0"></div></div>
+                  <div class="hint" id="uploadText"></div>
+                </div>
                 <div class="full form-foot">
                   <span class="hint" id="filenamePreview"></span>
                   <button class="btn" type="submit">Lancer le traitement</button>
                 </div>
               </form>
+
+              <!-- Traitement par lot : une liste de liens, préparée puis lancée d'un coup -->
+              <div class="batch" id="batchPanel" data-panel="batch" hidden>
+                <p class="hint">Préparez une liste de liens YouTube, modifiez ou retirez des lignes, puis lancez le tout : les traitements partent dans la file d'attente. <b>Le début et la fin de la prédication se règlent pour chaque ligne.</b> La liste est conservée si vous quittez la page.</p>
+                <label>Intro de tous les podcasts de la liste
+                  <select id="batchIntroSelect"></select>
+                </label>
+                <div class="batch-add">
+                  <input id="batchUrl" type="url" placeholder="Lien YouTube" autocomplete="off">
+                  <input id="batchTitle" placeholder="Nom du podcast" autocomplete="off">
+                  <input id="batchDate" type="date">
+                  <input id="batchStart" placeholder="Début (facultatif) 1:05:30" autocomplete="off" title="Début de la prédication pour ce lien seulement">
+                  <input id="batchEnd" placeholder="Fin (facultatif) 2:10:00" autocomplete="off" title="Fin de la prédication pour ce lien seulement">
+                  <button class="btn" type="button" id="batchAddBtn"><span data-ic="plus"></span> Ajouter</button>
+                </div>
+                <div id="batchList" class="batch-list"></div>
+                <div class="batch-foot">
+                  <div class="actions">
+                    <button class="btn small ghost" type="button" id="batchPasteBtn"><span data-ic="list"></span> Coller une liste</button>
+                    <button class="btn small ghost danger" type="button" id="batchClearBtn"><span data-ic="trash"></span> Tout vider</button>
+                  </div>
+                  <button class="btn" type="button" id="batchRunBtn"><span data-ic="play"></span> <span id="batchRunLabel">Lancer</span></button>
+                </div>
+              </div>
             </div>
 
             <div class="explorer" id="explorer" tabindex="0"></div>
