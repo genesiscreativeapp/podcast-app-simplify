@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .. import config, r2sync, storage
-from ..db import Folder, Job, SessionLocal, resolve_intro
+from ..db import Folder, Job, SessionLocal, ai_enabled, resolve_intro
 from ..utils import fmt_time
 from . import audio, steps
 from .detect import detect_sermon
@@ -65,6 +65,7 @@ def run_job(job_id: int) -> None:
         job = s.get(Job, job_id)
         folder = s.get(Folder, job.folder_id)
         intro = resolve_intro(s, folder, job.intro_id)
+        use_ai = ai_enabled(s)  # décidé au démarrage : tout le traitement suit le même choix
         url, title, date, filename = job.youtube_url, job.title, job.date, job.filename
         known_title = job.video_title
         start_ov, end_ov = job.start_override, job.end_override
@@ -107,7 +108,9 @@ def run_job(job_id: int) -> None:
             audio.to_whisper(src, wav16, duration, rep.sub("detect", 0.0, 0.1))
             segs = transcribe_sampled(wav16, duration, rep.sub("detect", 0.1, 1.0))
             wav16.unlink(missing_ok=True)
-            start, end, note = detect_sermon(segs, duration, video_title or title, rep.log)
+            if config.LLM_PROVIDER in ("anthropic", "openai") and not use_ai:
+                rep.log("IA désactivée par l'administrateur : repérage par heuristique")
+            start, end, note = detect_sermon(segs, duration, video_title or title, rep.log, use_ai)
         if end - start < 30:
             raise RuntimeError(f"Prédication trop courte détectée ({start:.0f}s → {end:.0f}s)")
         rep._update(sermon_start=start, sermon_end=end, detection_note=note)
@@ -115,7 +118,7 @@ def run_job(job_id: int) -> None:
 
         # Marge autour d'une prédication repérée automatiquement : l'IA retirera ensuite précisément
         # l'adoration qui précède et les annonces qui suivent (sans IA, pas de marge)
-        offtopic_on = config.REMOVE_OFFTOPIC and config.LLM_PROVIDER in ("anthropic", "openai")
+        offtopic_on = config.REMOVE_OFFTOPIC and use_ai
         auto = start_ov is None and end_ov is None
         pad_b = min(config.OFFTOPIC_PAD_BEFORE, start) if offtopic_on and auto else 0.0
         # sans IA : petite marge seulement, pour pouvoir finir sur une fin de phrase plutôt qu'en plein mot
@@ -154,7 +157,7 @@ def run_job(job_id: int) -> None:
                 rep.log(offtopic_note)
         else:
             extra_cuts = tail_cut
-            rep.log("Pas d'IA configurée : témoignages et annonces non retirés")
+            rep.log("Pas d'IA : témoignages et annonces non retirés")
 
         # 3d. Montage : silences, « euh », répétitions
         rep.step("edit")

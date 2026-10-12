@@ -69,6 +69,10 @@ Bouton **Rogner** sur un podcast terminé : on écoute, on place le curseur et �
 - **Sans LLM** : une heuristique retient la plus longue zone de parole dense. La louange chantée a un débit de mots plus faible et les annonces sont courtes. Cela fonctionne bien quand le culte est classique, moins bien avec un long temps de prière parlée.
 - **Bornes manuelles** : si vous les saisissez, l'étape de repérage est sautée et le traitement est bien plus rapide.
 
+**Activer / désactiver l'IA.** L'administrateur clique sur la pastille « IA activée / désactivée » en haut de l'interface : sans crédit ou pour ne rien dépenser, l'IA est coupée sans toucher à la configuration (`LLM_PROVIDER` reste en place). Désactivée, le repérage passe par l'heuristique et l'adoration, les témoignages et les annonces ne sont pas retirés. S'applique aux traitements qui démarrent ensuite.
+
+**Traitement par lot.** Une ligne = un traitement : un lien YouTube **ou** un fichier audio / vidéo, avec son propre nom, sa date, son début / fin et son intro (celle de la liste par défaut). Les fichiers ajoutés à un lot sont **envoyés sur le serveur dès leur ajout** (zone d'attente `data/staging`) : ils restent dans la liste après un rechargement de la page, un autre navigateur ou un autre appareil, et sont supprimés s'ils ne sont pas lancés au bout de `STAGING_DAYS` jours (7 par défaut). Retirer une ligne supprime aussi son fichier du serveur.
+
 **Fin du podcast.** Le podcast se termine par un **fondu de sortie** (`FADE_OUT`, 2,5 s ; 0 = coupure nette). Sans IA, la fin repérée est recalée sur la fin de phrase la plus proche (jusqu'à `END_MARGIN`, 25 s, lues au-delà), pour ne plus couper un mot ou une phrase en plein milieu. Avec l'IA, la fin donnée par le modèle inclut la ligne de 30 s citée, et le retrait précis des annonces fait le reste. **Si l'IA ne répond pas** (crédit épuisé, clé refusée…), le journal du traitement l'indique avec le motif de l'API et on retombe sur l'heuristique : la fin est alors moins fiable.
 
 ## Adoration, témoignages, annonces

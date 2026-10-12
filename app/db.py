@@ -168,6 +168,12 @@ def _init_db() -> None:
 MAX_PARALLEL_LIMIT = 20
 
 
+def ai_enabled(session) -> bool:
+    """L'IA sert si un fournisseur est configuré (LLM_PROVIDER) ET que l'administrateur ne l'a pas désactivée dans l'interface."""
+    row = session.get(Setting, "ai_enabled")
+    return config.LLM_PROVIDER in ("anthropic", "openai") and (row is None or row.value != "0")
+
+
 def get_max_parallel(session) -> int:
     row = session.get(Setting, "max_parallel")
     try:

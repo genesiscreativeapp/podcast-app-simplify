@@ -18,12 +18,14 @@ WORK_DIR = DATA_DIR / "work"        # fichiers temporaires d'un traitement
 OUTPUT_DIR = DATA_DIR / "outputs"   # copies locales des podcasts finaux
 INTRO_DIR = DATA_DIR / "intros"     # intros (globale + par dossier)
 CACHE_DIR = DATA_DIR / "cache"      # audio YouTube conservé : un « Relancer » ne le retélécharge pas
+STAGING_DIR = DATA_DIR / "staging"  # fichiers envoyés dans un lot, en attente de lancement (hors du ménage du cache)
 DB_PATH = DATA_DIR / "app.db"
-for _d in (WORK_DIR, OUTPUT_DIR, INTRO_DIR, CACHE_DIR):
+for _d in (WORK_DIR, OUTPUT_DIR, INTRO_DIR, CACHE_DIR, STAGING_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 KEEP_WORK_FILES = _bool("KEEP_WORK_FILES", False)
 UPLOAD_SCHEME = "upload://"  # youtube_url d'un traitement créé à partir d'un fichier envoyé
+STAGING_DAYS = int(_env("STAGING_DAYS", "7"))  # jours de conservation d'un fichier de lot jamais lancé
 MAX_UPLOAD_MB = int(_env("MAX_UPLOAD_MB", "4096"))  # taille maximale d'un fichier audio/vidéo envoyé
 KEEP_SOURCES = int(_env("KEEP_SOURCES", "5"))  # nombre d'audios YouTube gardés en cache (0 = aucun)
 

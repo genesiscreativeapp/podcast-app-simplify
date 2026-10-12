@@ -1,7 +1,9 @@
 """API web + interface."""
+import json
 import re
 import secrets
 import shutil
+import time
 from datetime import date as date_cls, datetime
 from pathlib import Path
 
@@ -15,7 +17,7 @@ from . import auth, config, r2sync, storage
 from .access import Access
 from .pipeline import audio
 from .db import (MAX_PARALLEL_LIMIT, Folder, FolderAccess, Intro, Job, Setting, SessionLocal, User, folder_path,
-                 get_max_parallel, init_db, queue_position)
+                 ai_enabled, get_max_parallel, init_db, queue_position)
 from .pipeline import steps
 from .utils import fmt_time, parse_time, slugify
 
@@ -58,7 +60,7 @@ def folder_dict(f: Folder) -> dict:
     return {"id": f.id, "name": f.name, "parent_id": f.parent_id, "intro_id": f.intro_id}
 
 
-def job_steps(j: Job) -> list[dict]:
+def job_steps(j: Job, ai: bool | None = None) -> list[dict]:
     skipped = set()
     if j.youtube_url.startswith(UPLOAD_SCHEME):
         skipped.add("download")  # fichier envoyé par l'utilisateur : rien à télécharger
@@ -66,14 +68,16 @@ def job_steps(j: Job) -> list[dict]:
         skipped.add("detect")  # bornes saisies : pas de repérage
     if not (j.r2_key_mp3 if j.status == "done" else storage.enabled()):
         skipped.add("upload")
-    if not (config.REMOVE_OFFTOPIC and config.LLM_PROVIDER in ("anthropic", "openai")):
+    if ai is None:
+        ai = config.LLM_PROVIDER in ("anthropic", "openai")
+    if not (config.REMOVE_OFFTOPIC and ai):
         skipped.add("clean")  # témoignages et annonces : nécessite une IA
     return steps.view(j.progress or 0.0, j.status, skipped)
 
 
 def job_dict(j: Job, with_log: bool = False, s=None, a: Access | None = None) -> dict:
     d = {
-        "steps": job_steps(j),
+        "steps": job_steps(j, ai_enabled(s) if s is not None else None),
         "id": j.id, "folder_id": j.folder_id, "intro_id": j.intro_id, "youtube_url": j.youtube_url,
         "title": j.title, "date": j.date, "filename": j.filename,
         "status": j.status, "step": j.step, "progress": round(j.progress or 0, 3),
@@ -323,7 +327,8 @@ def play_intro(intro_id: int, s=Depends(db)):
 # --- Traitements ----------------------------------------------------------------
 class JobIn(BaseModel):
     folder_id: int
-    youtube_url: str
+    youtube_url: str = ""
+    upload_id: str | None = None  # fichier déjà envoyé (zone d'attente d'un lot) à la place d'un lien
     title: str
     date: str | None = None
     start: str | None = None
@@ -375,9 +380,128 @@ def _job_fields(body_title, body_date, start, end, intro_id, s):
     return title, day, start, end
 
 
+# --- Fichiers envoyés : zone d'attente (lots) puis rattachement à un traitement ------------------
+STAGED_ID = re.compile(r"[0-9a-f]{16}")
+
+
+def _purge_staging() -> None:
+    """Retire les fichiers en attente depuis trop longtemps (ajoutés à un lot mais jamais lancés) et les envois interrompus."""
+    now = time.time()
+    for d in config.STAGING_DIR.iterdir():
+        limit = 86400 if d.name.endswith(".part") else config.STAGING_DAYS * 86400
+        if now - d.stat().st_mtime > limit:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+_purge_staging()
+
+
+def _stage_file(file: UploadFile, username: str) -> dict:
+    """Enregistre un fichier envoyé dans la zone d'attente. Visible seulement une fois complet et lisible."""
+    name = Path(file.filename or "").name
+    ext = Path(name).suffix.lower()
+    if ext not in UPLOAD_EXT:
+        raise HTTPException(400, "Format non pris en charge (MP3, M4A, WAV, MP4, MKV, MOV, WEBM…)")
+    _purge_staging()
+    uid = secrets.token_hex(8)
+    part = config.STAGING_DIR / f"{uid}.part"
+    try:
+        part.mkdir()
+        dest, written, limit = part / f"source{ext}", 0, config.MAX_UPLOAD_MB * 1024 * 1024
+        with open(dest, "wb") as out:
+            while chunk := file.file.read(1024 * 1024):
+                written += len(chunk)
+                if written > limit:
+                    raise HTTPException(413, f"Fichier trop volumineux (maximum {config.MAX_UPLOAD_MB} Mo)")
+                out.write(chunk)
+        try:
+            audio.probe_duration(dest)
+        except Exception:
+            raise HTTPException(400, "Ce fichier n'est pas un audio ou une vidéo lisible")
+        meta = {"id": uid, "name": name, "size": written, "owner": username}
+        (part / "meta.json").write_text(json.dumps(meta))
+        part.replace(config.STAGING_DIR / uid)
+    except BaseException:
+        shutil.rmtree(part, ignore_errors=True)
+        raise
+    return meta
+
+
+def _staged(upload_id: str, user: User) -> tuple[Path, dict]:
+    """Dossier et description d'un fichier en attente (réservé à celui qui l'a envoyé)."""
+    gone = HTTPException(404, "Fichier envoyé introuvable ou expiré : renvoyez-le")
+    if not STAGED_ID.fullmatch(upload_id):
+        raise gone
+    d = config.STAGING_DIR / upload_id
+    try:
+        meta = json.loads((d / "meta.json").read_text())
+    except (OSError, ValueError):
+        raise gone
+    if meta.get("owner") != user.username:
+        raise gone
+    return d, meta
+
+
+def _job_from_staged(s, a: Access, user: User, upload_id: str, folder_id: int, title: str, day: str,
+                     start, end, intro) -> Job:
+    """Crée le traitement et lui donne le fichier en attente comme audio source (même suite que pour un lien)."""
+    d, meta = _staged(upload_id, user)
+    job = Job(folder_id=folder_id, intro_id=intro, created_by=user.username,
+              youtube_url=f"{UPLOAD_SCHEME}{meta['name']}", video_title=Path(meta["name"]).stem, title=title, date=day,
+              filename=f"{slugify(title)}_{day}", start_override=start, end_override=end)
+    s.add(job)
+    s.flush()  # id du traitement, sans le rendre visible au worker avant que le fichier soit en place
+    final, moved = config.CACHE_DIR / str(job.id), False
+    try:
+        shutil.rmtree(final, ignore_errors=True)
+        d.replace(final)
+        moved = True
+        (final / "ok").touch()
+        s.commit()
+    except BaseException:
+        s.rollback()
+        if moved:
+            (final / "ok").unlink(missing_ok=True)
+            final.replace(d)  # le fichier reste en attente : rien n'est perdu
+        raise
+    (final / "meta.json").unlink(missing_ok=True)
+    return job
+
+
+@app.post("/api/uploads", dependencies=[Depends(auth.need("jobs.create"))])
+def stage_upload(request: Request, file: UploadFile = File(...)):
+    """Envoie un fichier dès son ajout à un lot : il reste sur le serveur jusqu'au lancement (STAGING_DAYS jours)."""
+    m = _stage_file(file, request.state.user.username)
+    return {k: m[k] for k in ("id", "name", "size")}
+
+
+@app.get("/api/uploads", dependencies=[Depends(auth.need("jobs.create"))])
+def list_uploads(request: Request):
+    out = []
+    for d in sorted(config.STAGING_DIR.iterdir()):
+        if STAGED_ID.fullmatch(d.name):
+            try:
+                _, m = _staged(d.name, request.state.user)
+                out.append({k: m[k] for k in ("id", "name", "size")})
+            except HTTPException:
+                pass
+    return out
+
+
+@app.delete("/api/uploads/{upload_id}", dependencies=[Depends(auth.need("jobs.create"))])
+def delete_upload(upload_id: str, request: Request):
+    d, _ = _staged(upload_id, request.state.user)
+    shutil.rmtree(d, ignore_errors=True)
+    return {"ok": True}
+
+
 @app.post("/api/jobs", dependencies=[Depends(auth.need("jobs.create"))])
 def create_job(body: JobIn, request: Request, s=Depends(db), a: Access = Depends(acl)):
     a.need_folder(body.folder_id)
+    if body.upload_id:
+        title, day, start, end = _job_fields(body.title, body.date, body.start, body.end, body.intro_id, s)
+        job = _job_from_staged(s, a, request.state.user, body.upload_id, body.folder_id, title, day, start, end, body.intro_id)
+        return job_dict(job, s=s, a=a)
     url = body.youtube_url.strip()
     if not url.startswith(("http://", "https://")):
         raise HTTPException(400, "Lien YouTube invalide")
@@ -393,48 +517,20 @@ def create_job(body: JobIn, request: Request, s=Depends(db), a: Access = Depends
 def create_job_from_file(request: Request, file: UploadFile = File(...), folder_id: int = Form(...), title: str = Form(""),
                          date: str = Form(""), start: str = Form(""), end: str = Form(""), intro_id: str = Form(""),
                          s=Depends(db), a: Access = Depends(acl)):
-    """Traitement à partir d'un fichier audio/vidéo envoyé (au lieu d'un lien YouTube). Le fichier prend la place
-    de l'audio téléchargé : même traitement ensuite. Le traitement n'est créé qu'une fois le fichier complet et lisible."""
+    """Traitement individuel à partir d'un fichier audio/vidéo envoyé (au lieu d'un lien YouTube) : envoi puis rattachement."""
     a.need_folder(folder_id)
-    name = Path(file.filename or "").name
-    ext = Path(name).suffix.lower()
-    if ext not in UPLOAD_EXT:
-        raise HTTPException(400, "Format non pris en charge (MP3, M4A, WAV, MP4, MKV, MOV, WEBM…)")
     try:
         intro = None if intro_id == "" else int(intro_id)
     except ValueError:
         raise HTTPException(400, "Intro invalide")
+    name = Path(file.filename or "").name
     title, day, start_s, end_s = _job_fields(title or Path(name).stem, date, start, end, intro, s)
-    tmp = config.CACHE_DIR / f"upload-{secrets.token_hex(6)}"
-    final = None
+    user = request.state.user
+    meta = _stage_file(file, user.username)
     try:
-        tmp.mkdir(parents=True)
-        dest, written, limit = tmp / f"source{ext}", 0, config.MAX_UPLOAD_MB * 1024 * 1024
-        with open(dest, "wb") as out:
-            while chunk := file.file.read(1024 * 1024):
-                written += len(chunk)
-                if written > limit:
-                    raise HTTPException(413, f"Fichier trop volumineux (maximum {config.MAX_UPLOAD_MB} Mo)")
-                out.write(chunk)
-        try:
-            audio.probe_duration(dest)
-        except Exception:
-            raise HTTPException(400, "Ce fichier n'est pas un audio ou une vidéo lisible")
-        job = Job(folder_id=folder_id, intro_id=intro, created_by=request.state.user.username,
-                  youtube_url=f"{UPLOAD_SCHEME}{name}", video_title=Path(name).stem, title=title, date=day,
-                  filename=f"{slugify(title)}_{day}", start_override=start_s, end_override=end_s)
-        s.add(job)
-        s.flush()  # id du traitement, sans le rendre visible au worker avant que le fichier soit en place
-        final = config.CACHE_DIR / str(job.id)
-        shutil.rmtree(final, ignore_errors=True)
-        tmp.replace(final)
-        (final / "ok").touch()
-        s.commit()
+        job = _job_from_staged(s, a, user, meta["id"], folder_id, title, day, start_s, end_s, intro)
     except BaseException:
-        s.rollback()
-        shutil.rmtree(tmp, ignore_errors=True)
-        if final is not None:
-            shutil.rmtree(final, ignore_errors=True)
+        shutil.rmtree(config.STAGING_DIR / meta["id"], ignore_errors=True)
         raise
     return job_dict(job, s=s, a=a)
 
@@ -636,11 +732,13 @@ def status(s=Depends(db), a: Access = Depends(acl)):
     count = lambda st: a.jobs(s.query(Job)).filter(Job.status == st).count()
     return {
         "r2": storage.enabled(),
-        "llm": config.LLM_PROVIDER if config.LLM_PROVIDER in ("anthropic", "openai") else None,
+        "llm": config.LLM_PROVIDER if ai_enabled(s) else None,  # fournisseur réellement utilisé (None = heuristique)
+        "ai_available": config.LLM_PROVIDER in ("anthropic", "openai"), "ai_enabled": ai_enabled(s),
+        "llm_provider": config.LLM_PROVIDER if config.LLM_PROVIDER in ("anthropic", "openai") else None,
         "running": count("running"), "pending": count("pending"),
         "r2_sync": r2sync.status(),
         "max_parallel": get_max_parallel(s), "max_parallel_limit": MAX_PARALLEL_LIMIT,
-        "max_upload_mb": config.MAX_UPLOAD_MB,
+        "max_upload_mb": config.MAX_UPLOAD_MB, "staging_days": config.STAGING_DAYS,
     }
 
 
@@ -656,6 +754,20 @@ def r2_sync_run():
         raise HTTPException(400, "R2 n'est pas configuré")
     r2sync.trigger()
     return r2sync.status()
+
+
+class AiIn(BaseModel):
+    enabled: bool
+
+
+@app.put("/api/settings/ai", dependencies=[Depends(auth.need("admin"))])
+def put_ai(body: AiIn, s=Depends(db)):
+    """Active ou coupe l'IA (repérage de la prédication, retrait des témoignages et annonces), sans toucher à la configuration."""
+    if body.enabled and config.LLM_PROVIDER not in ("anthropic", "openai"):
+        raise HTTPException(400, "Aucun fournisseur d'IA n'est configuré (LLM_PROVIDER et LLM_API_KEY)")
+    s.merge(Setting(key="ai_enabled", value="1" if body.enabled else "0"))
+    s.commit()
+    return {"ai_enabled": ai_enabled(s)}
 
 
 class SettingsIn(BaseModel):

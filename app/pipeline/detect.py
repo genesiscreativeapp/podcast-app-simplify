@@ -136,8 +136,8 @@ def detect_heuristic(segments: list[dict], duration: float, coverage: float = 1.
     return start, end, "Heuristique : plus longue zone de parole continue"
 
 
-def detect_sermon(segments: list[dict], duration: float, title: str | None, log) -> tuple[float, float, str]:
-    if config.LLM_PROVIDER in ("anthropic", "openai"):
+def detect_sermon(segments: list[dict], duration: float, title: str | None, log, use_ai: bool) -> tuple[float, float, str]:
+    if use_ai:
         try:
             start, end, note = detect_with_llm(segments, title)
             if 0 <= start < end <= duration + 5 and end - start >= 120:

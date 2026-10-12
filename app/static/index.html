@@ -199,17 +199,27 @@
 
               <!-- Traitement par lot : une liste de liens, préparée puis lancée d'un coup -->
               <div class="batch" id="batchPanel" data-panel="batch" hidden>
-                <p class="hint">Préparez une liste de liens YouTube, modifiez ou retirez des lignes, puis lancez le tout : les traitements partent dans la file d'attente. <b>Le début et la fin de la prédication se règlent pour chaque ligne.</b> La liste est conservée si vous quittez la page.</p>
-                <label>Intro de tous les podcasts de la liste
+                <p class="hint">Préparez une liste de liens YouTube et/ou de fichiers audio ou vidéo, modifiez ou retirez des lignes, puis lancez le tout : les traitements partent dans la file d'attente. <b>Le début et la fin de la prédication se règlent pour chaque ligne.</b> La liste est conservée si vous quittez ou rechargez la page.</p>
+                <label>Intro par défaut de la liste (modifiable ligne par ligne)
                   <select id="batchIntroSelect"></select>
                 </label>
-                <div class="batch-add">
+                <div class="source-switch" id="batchSource" role="group" aria-label="Ajouter des liens ou des fichiers">
+                  <button type="button" class="active" data-bsrc="url"><span data-ic="link"></span> Liens YouTube</button>
+                  <button type="button" data-bsrc="file"><span data-ic="upload"></span> Fichiers audio / vidéo</button>
+                </div>
+                <div class="batch-add" data-bsrc-panel="url">
                   <input id="batchUrl" type="url" placeholder="Lien YouTube" autocomplete="off">
                   <input id="batchTitle" placeholder="Nom du podcast" autocomplete="off">
                   <input id="batchDate" type="date">
                   <input id="batchStart" placeholder="Début (facultatif) 1:05:30" autocomplete="off" title="Début de la prédication pour ce lien seulement">
                   <input id="batchEnd" placeholder="Fin (facultatif) 2:10:00" autocomplete="off" title="Fin de la prédication pour ce lien seulement">
                   <button class="btn" type="button" id="batchAddBtn"><span data-ic="plus"></span> Ajouter</button>
+                </div>
+                <div class="dropzone" id="batchDrop" data-bsrc-panel="file" hidden>
+                  <span class="dz-ic" data-ic="upload"></span>
+                  <b>Glissez plusieurs fichiers ici ou cliquez pour les choisir</b>
+                  <span class="hint">MP3, M4A, WAV, MP4, MKV, MOV, WEBM… : un traitement par fichier (jusqu'à <span id="batchMaxUpload">4 Go</span> chacun). Ils sont envoyés sur le serveur dès leur ajout et restent dans la liste si vous rechargez la page (conservés <span id="stagingDays">7</span> jours s'ils ne sont pas lancés).</span>
+                  <input type="file" id="batchFiles" multiple accept="audio/*,video/*,.mkv,.m4a,.aac,.opus,.flac">
                 </div>
                 <div id="batchList" class="batch-list"></div>
                 <div class="batch-foot">

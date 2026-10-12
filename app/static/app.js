@@ -230,6 +230,7 @@ async function startApp() {
   $("parallelBox").hidden = !can("settings.manage");
   $("introForm").hidden = !can("intros.manage");
   await Promise.all([loadFolders(), loadIntros()]);
+  await syncBatchUploads();
   loadStatus();
   await route();
   tick();
@@ -532,6 +533,26 @@ async function trimDialog(job) {
 }
 
 // ---------- Statut, parallélisme ----------
+function aiPill(s) {  // l'administrateur clique pour activer / désactiver l'IA
+  if (!s.ai_available) return '<span class="pill" title="Aucun fournisseur d\'IA configuré (LLM_PROVIDER)">Détection heuristique</span>';
+  const label = s.ai_enabled ? `IA activée (${esc(s.llm_provider)})` : "IA désactivée";
+  return state.me.is_admin ? `<button type="button" class="pill link ${s.ai_enabled ? "on" : "off"}" data-ai title="Activer / désactiver l'IA">${label}</button>`
+    : `<span class="pill ${s.ai_enabled ? "on" : ""}">${label}</span>`;
+}
+async function aiDialog() {
+  const s = state.status, on = s.ai_enabled;
+  const r = await modal({
+    title: "Utilisation de l'IA", icon: "✨",
+    body: `<p>L'IA (${esc(s.llm_provider)}) repère le début et la fin de la prédication et retire l'adoration, les témoignages et les annonces. Elle est actuellement <b>${on ? "activée" : "désactivée"}</b>.</p>
+      <p>${on ? "En la désactivant : repérage par heuristique (moins fiable), adoration, témoignages et annonces <b>non retirés</b>, et plus aucun appel (donc aucun coût) vers l'API."
+        : "En l'activant : les prochains traitements utilisent l'IA (appels payants à l'API : vérifiez votre crédit)."}</p>
+      <p class="hint">S'applique aux traitements qui démarrent à partir de maintenant ; ceux déjà en cours gardent leur choix.</p>`,
+    buttons: [{ label: "Annuler", kind: "ghost", value: null }, { label: on ? "Désactiver l'IA" : "Activer l'IA", kind: on ? "danger-fill" : "", primary: true }],
+    submit: () => api("/api/settings/ai", { method: "PUT", body: { enabled: !on } }),
+  });
+  if (r) { toast(on ? "IA désactivée" : "IA activée", "ok"); await loadStatus(); refreshView(); }
+}
+
 function r2Pill(s) {
   if (!s.r2) return '<span class="pill">R2 non configuré</span>';
   const sy = s.r2_sync || {};
@@ -556,18 +577,22 @@ async function r2Dialog() {
   });
   if (go) { toast("Synchronisation R2 lancée", "ok"); loadStatus(); }
 }
-$("statusBar").addEventListener("click", (e) => { if (e.target.closest("[data-r2]")) r2Dialog(); });
+$("statusBar").addEventListener("click", (e) => {
+  if (e.target.closest("[data-r2]")) r2Dialog();
+  else if (e.target.closest("[data-ai]")) aiDialog();
+});
 
 async function loadStatus() {
   const s = await api("/api/status").catch(() => null);
   if (!s) return null;
   $("statusBar").innerHTML = `
     ${r2Pill(s)}
-    <span class="pill ${s.llm ? "on" : ""}">Détection ${s.llm ? "IA (" + s.llm + ")" : "heuristique"}</span>
+    ${aiPill(s)}
     <span class="pill link ${s.running ? "busy" : ""}" data-status="active">▶ ${s.running}/${s.max_parallel} en cours</span>
     <span class="pill link ${s.pending ? "waiting" : ""}" data-status="active">⏳ ${s.pending} en file</span>`;
   const mb = s.max_upload_mb;
-  $("maxUpload").textContent = mb >= 1024 ? `${(mb / 1024).toFixed(1).replace(".0", "")} Go` : `${mb} Mo`;
+  $("stagingDays").textContent = s.staging_days;
+  $("maxUpload").textContent = $("batchMaxUpload").textContent = mb >= 1024 ? `${(mb / 1024).toFixed(1).replace(".0", "")} Go` : `${mb} Mo`;
   const wasSyncing = state.status?.r2_sync?.running;
   state.status = s;
   if (wasSyncing && !s.r2_sync?.running) {
@@ -1057,6 +1082,7 @@ function renderIntroSelects() {  // un sélecteur par mode : l'intro d'un traite
 async function loadIntros() {
   state.intros = await api("/api/intros").catch(() => state.intros);
   renderIntroSelects();
+  renderBatch();  // les sélecteurs d'intro des lignes du lot suivent la bibliothèque
   if (state.view === "intros") renderIntroList();
   if (state.view === "folders") renderExplorer();
 }
@@ -1167,10 +1193,10 @@ jobFile.onchange = () => showPicked(jobFile.files[0]);
 ["dragenter", "dragover"].forEach((t) => dropzone.addEventListener(t, () => dropzone.classList.add("over")));
 ["dragleave", "drop"].forEach((t) => dropzone.addEventListener(t, () => dropzone.classList.remove("over")));
 
-function uploadJob(fd, onProgress) {  // XHR : fetch ne donne pas la progression d'un envoi
+function uploadJob(fd, onProgress, url = "/api/jobs/upload") {  // XHR : fetch ne donne pas la progression d'un envoi
   return new Promise((resolve, reject) => {
     const x = new XMLHttpRequest();
-    x.open("POST", "/api/jobs/upload");
+    x.open("POST", url);
     x.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded, e.total);
     x.onload = () => {
       let data = {};
@@ -1226,12 +1252,41 @@ form.onsubmit = async (e) => {
 };
 setSource("url");
 
-// ---------- Liste de liens à préparer (ajout groupé) ----------
-let batch = [];
-try { batch = JSON.parse(localStorage.getItem("batch") || "[]"); } catch {}
-const saveBatch = () => { try { localStorage.setItem("batch", JSON.stringify(batch)); } catch {} };
+// ---------- Traitement par lot : liens et fichiers à préparer ----------
+// Une ligne = un traitement, avec son propre nom, sa date, ses bornes et son intro.
+// kind « url » : lien YouTube ; kind « file » : fichier audio / vidéo, envoyé sur le serveur dès son ajout (zone d'attente) :
+// la ligne ne garde que son identifiant (uploadId), elle survit donc à un rechargement de la page.
+const ROW_INTRO_FIRST = [["", "Intro : comme le reste de la liste"], ["auto", "Intro : automatique (dossier, sinon par défaut)"]];
+let batch = [], batchRunning = false, batchUploads = Promise.resolve();
+const batchKey = () => "batch:" + state.me.username;  // un lot par compte, même sur un navigateur partagé
+function loadBatch() {
+  try { return JSON.parse(localStorage.getItem(batchKey()) ?? localStorage.getItem("batch") ?? "[]").map((r) => ({ kind: "url", intro: null, ...r })); }
+  catch { return []; }
+}
+const saveBatch = () => { try { localStorage.setItem(batchKey(), JSON.stringify(batch.filter((r) => r.kind === "url" || r.uploadId).map(({ progress, ...r }) => r))); } catch {} };
+const dropStaged = (rows) => rows.filter((r) => r.kind === "file" && r.uploadId).forEach((r) => api(`/api/uploads/${r.uploadId}`, { method: "DELETE" }).catch(() => {}));
+
+// Au démarrage : les fichiers expirés sont retirés ; ceux qui attendent sur le serveur sans ligne (autre appareil, stockage vidé) reviennent dans la liste
+async function syncBatchUploads() {
+  batch = loadBatch();
+  const mine = await api("/api/uploads").catch(() => null);
+  if (mine) {
+    const ids = new Set(mine.map((u) => u.id));
+    const lost = batch.filter((r) => r.kind === "file" && !ids.has(r.uploadId));
+    if (lost.length) { batch = batch.filter((r) => !lost.includes(r)); toast(`${lost.length} fichier(s) du lot ont expiré sur le serveur : renvoyez-les`, true); }
+    const known = new Set(batch.filter((r) => r.kind === "file").map((r) => r.uploadId));
+    for (const u of mine.filter((u) => !known.has(u.id))) {
+      batch.push({ id: newId(), kind: "file", uploadId: u.id, name: u.name, size: u.size, title: u.name.replace(/\.[^.]+$/, "").replace(/_+/g, " "),
+        date: form.date.value, start: "", end: "", intro: null, error: "" });
+    }
+    saveBatch();
+  }
+  renderBatch();
+}
 const newId = () => Math.random().toString(36).slice(2, 9);
 const fmtBounds = (r) => r.start || r.end ? `${r.start || "début"} → ${r.end || "fin"}` : "";
+// intro réellement utilisée par une ligne : "" = automatique, "0" = aucune, sinon id (la ligne l'emporte sur le choix de la liste)
+const introFor = (r) => (r.intro ? (r.intro === "auto" ? "" : r.intro) : $("batchIntroSelect").value);
 
 function renderBatch() {
   $("batchCount").textContent = batch.length || "";
@@ -1240,28 +1295,39 @@ function renderBatch() {
       <span class="n">${i + 1}</span>
       <div style="min-width:0"><div class="t">${esc(r.title)} <span class="muted">· ${esc(r.date)}</span>
         ${fmtBounds(r) ? `<span class="chip accent">${esc(fmtBounds(r))}</span>` : ""}</div>
-        <div class="u">${esc(r.url)}</div></div>
+        <div class="u">${r.kind === "file" ? `${ic("upload")} ${esc(r.name)} · ${fmtSize(r.size)}${r.uploadId ? " · sur le serveur" : ""}` : esc(r.url)}</div></div>
       <div class="actions">
         <button class="icon-btn" type="button" data-batch="edit" title="Modifier">${ic("edit")}</button>
         <button class="icon-btn danger" type="button" data-batch="delete" title="Retirer de la liste">${ic("trash")}</button>
       </div>
+      <div class="r-intro"><span data-ic="music">${ic("music")}</span>
+        <select data-batch-intro aria-label="Intro de cette ligne">${introOptions(ROW_INTRO_FIRST, true, r.intro ?? "")}</select></div>
+      ${r.progress != null ? `<div class="batch-prog"><i style="width:${r.progress}%"></i></div>` : ""}
       ${r.error ? `<div class="e">${esc(r.error)}</div>` : ""}
-    </div>`).join("") : '<div class="batch-empty">La liste est vide. Ajoutez un lien ci-dessus.</div>';
+    </div>`).join("") : '<div class="batch-empty">La liste est vide. Ajoutez un lien ou des fichiers ci-dessus.</div>';
   $("batchRunLabel").textContent = batch.length ? `Lancer ${batch.length} traitement${batch.length > 1 ? "s" : ""}` : "Lancer";
-  $("batchRunBtn").disabled = !batch.length;
+  $("batchRunBtn").disabled = !batch.length || batch.some((r) => r.progress != null);  // pas de lancement pendant un envoi
   $("batchClearBtn").disabled = !batch.length;
 }
 
 function checkRow(r) {
-  if (!/^https?:\/\//i.test(r.url)) return "Le lien doit commencer par http:// ou https://";
+  if (r.kind === "url" && !/^https?:\/\//i.test(r.url)) return "Le lien doit commencer par http:// ou https://";
+  if (r.kind === "file" && !r.uploadId) return "Ce fichier n'a pas été envoyé : retirez la ligne et ajoutez-le à nouveau";
   if (!r.title.trim()) return "Le nom est obligatoire";
   for (const [k, label] of [["start", "Début"], ["end", "Fin"]]) if (r[k] && isNaN(parseClock(r[k]))) return `${label} : format h:mm:ss attendu (ex. 1:05:30)`;
   if (r.start && r.end && parseClock(r.end) <= parseClock(r.start)) return "La fin doit être après le début";
   return "";
 }
 
+// Source de l'ajout : liens ou fichiers
+function setBatchSource(next) {
+  document.querySelectorAll("#batchSource [data-bsrc]").forEach((b) => b.classList.toggle("active", b.dataset.bsrc === next));
+  document.querySelectorAll("[data-bsrc-panel]").forEach((el) => (el.hidden = el.dataset.bsrcPanel !== next));
+}
+$("batchSource").addEventListener("click", (e) => { const b = e.target.closest("[data-bsrc]"); if (b) setBatchSource(b.dataset.bsrc); });
+
 function addBatchRow() {
-  const r = { id: newId(), url: $("batchUrl").value.trim(), title: $("batchTitle").value.trim(),
+  const r = { id: newId(), kind: "url", url: $("batchUrl").value.trim(), title: $("batchTitle").value.trim(), intro: null, error: "",
     date: $("batchDate").value || form.date.value, start: $("batchStart").value.trim(), end: $("batchEnd").value.trim() };
   const err = checkRow(r);
   if (err) return toast(err, true);
@@ -1274,19 +1340,54 @@ function addBatchRow() {
 $("batchAddBtn").onclick = addBatchRow;
 [$("batchUrl"), $("batchTitle"), $("batchDate"), $("batchStart"), $("batchEnd")].forEach((el) => el.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addBatchRow(); } }));
 
+// Fichiers : un traitement par fichier, envoyé tout de suite sur le serveur (un à la fois), nom repris du fichier
+function addBatchFiles(files) {
+  const max = (state.status?.max_upload_mb || 4096) * 1024 * 1024, tooBig = [];
+  for (const f of files) {
+    if (f.size > max) { tooBig.push(f.name); continue; }
+    const r = { id: newId(), kind: "file", uploadId: null, name: f.name, size: f.size, title: f.name.replace(/\.[^.]+$/, "").replace(/_+/g, " "), intro: null, error: "",
+      date: $("batchDate").value || form.date.value, start: "", end: "", progress: 0 };
+    batch.push(r);
+    batchUploads = batchUploads.then(() => stageBatchFile(r, f));
+  }
+  renderBatch();
+  if (tooBig.length) toast(`Trop volumineux (maximum ${fmtSize(max)}) : ${tooBig.join(", ")}`, true);
+}
+async function stageBatchFile(r, file) {
+  if (!batch.includes(r)) return;  // retirée avant son tour
+  const fd = new FormData();
+  fd.append("file", file);
+  try {
+    const u = await uploadJob(fd, (done, total) => {
+      r.progress = Math.round((100 * done) / total);
+      const bar = document.querySelector(`.batch-row[data-id="${r.id}"] .batch-prog i`);
+      if (bar) bar.style.width = r.progress + "%";
+    }, "/api/uploads");
+    r.uploadId = u.id;
+    if (!batch.includes(r)) dropStaged([r]);  // retirée pendant l'envoi : on ne garde rien sur le serveur
+  } catch (err) { r.error = err.message; }
+  r.progress = null;
+  saveBatch();
+  renderBatch();
+}
+$("batchFiles").onchange = () => { addBatchFiles([...$("batchFiles").files]); $("batchFiles").value = ""; };
+["dragenter", "dragover"].forEach((t) => $("batchDrop").addEventListener(t, () => $("batchDrop").classList.add("over")));
+["dragleave", "drop"].forEach((t) => $("batchDrop").addEventListener(t, () => $("batchDrop").classList.remove("over")));
+
 async function editBatchRow(r) {
   const saved = await modal({
     title: "Modifier ce traitement", wide: true,
-    body: `<label>Lien YouTube<input name="url" value="${esc(r.url)}"></label>
+    body: `${r.kind === "file" ? `<label>Fichier<input value="${esc(r.name)}" disabled></label>` : `<label>Lien YouTube<input name="url" value="${esc(r.url)}"></label>`}
       <div class="row"><label>Nom<input name="title" value="${esc(r.title)}"></label>
       <label>Date<input name="date" type="date" value="${esc(r.date)}"></label></div>
       <div class="row"><label>Début de la prédication (facultatif)<input name="start" placeholder="1:05:30" value="${esc(r.start)}"></label>
       <label>Fin (facultatif)<input name="end" placeholder="2:10:00" value="${esc(r.end)}"></label></div>
+      <label>Intro<select name="intro">${introOptions(ROW_INTRO_FIRST, true, r.intro ?? "")}</select></label>
       <p class="hint">Début et fin vides = détection automatique.</p>`,
     buttons: [{ label: "Annuler", kind: "ghost", value: null }, { label: "Enregistrer", primary: true }],
     submit: async (dlg) => {
-      const v = (n) => dlg.querySelector(`[name=${n}]`).value.trim();
-      const next = { ...r, url: v("url"), title: v("title"), date: v("date") || r.date, start: v("start"), end: v("end"), error: "" };
+      const v = (n) => dlg.querySelector(`[name=${n}]`)?.value.trim() ?? "";
+      const next = { ...r, url: r.kind === "url" ? v("url") : "", title: v("title"), date: v("date") || r.date, start: v("start"), end: v("end"), intro: v("intro") || null, error: "" };
       const err = checkRow(next);
       if (err) throw new Error(err);
       Object.assign(r, next);
@@ -1297,15 +1398,22 @@ async function editBatchRow(r) {
 
 $("batchList").addEventListener("click", async (e) => {
   const b = e.target.closest("[data-batch]");
-  if (!b) return;
+  if (!b || batchRunning) return;
   const r = batch.find((x) => x.id === b.closest(".batch-row").dataset.id);
   if (b.dataset.batch === "edit") await editBatchRow(r);
-  else { batch = batch.filter((x) => x !== r); saveBatch(); renderBatch(); }
+  else { batch = batch.filter((x) => x !== r); dropStaged([r]); saveBatch(); renderBatch(); }
+});
+$("batchList").addEventListener("change", (e) => {
+  const sel = e.target.closest("[data-batch-intro]");
+  if (!sel) return;
+  batch.find((x) => x.id === sel.closest(".batch-row").dataset.id).intro = sel.value || null;
+  saveBatch();
 });
 
 $("batchClearBtn").onclick = async () => {
-  if (await confirmBox({ title: "Vider la liste ?", message: `Les ${batch.length} lien(s) préparés seront retirés de la liste (rien n'est supprimé ailleurs).`, confirmLabel: "Vider", danger: true })) {
-    batch = []; saveBatch(); renderBatch();
+  if (batchRunning) return;
+  if (await confirmBox({ title: "Vider la liste ?", message: `Les ${batch.length} ligne(s) préparées seront retirées de la liste (rien n'est supprimé ailleurs).`, confirmLabel: "Vider", danger: true })) {
+    dropStaged(batch); batch = []; saveBatch(); renderBatch();
   }
 };
 
@@ -1318,7 +1426,7 @@ $("batchPasteBtn").onclick = async () => {
     submit: async (dlg) => {
       const rows = dlg.querySelector("[name=text]").value.split("\n").map((l) => l.trim()).filter(Boolean).map((line) => {
         const [url, title, date, start, end] = line.split("|").map((p) => p.trim());
-        return { id: newId(), url: url || "", title: title || "", date: date || form.date.value, start: start || "", end: end || "", error: "" };
+        return { id: newId(), kind: "url", url: url || "", title: title || "", date: date || form.date.value, start: start || "", end: end || "", intro: null, error: "" };
       });
       if (!rows.length) throw new Error("Aucune ligne à ajouter");
       const bad = rows.map((r, i) => [i + 1, checkRow(r)]).filter(([, e]) => e);
@@ -1331,24 +1439,30 @@ $("batchPasteBtn").onclick = async () => {
 };
 
 $("batchRunBtn").onclick = (e) => busy(e.currentTarget, async () => {
-  if (!batch.length) return;
-  const intro = $("batchIntroSelect").value;
+  if (!batch.length || batchRunning) return;
+  batchRunning = true;
+  const folder = state.current;
   let ok = 0;
-  for (const r of [...batch]) {
-    try {
-      await api("/api/jobs", { method: "POST", body: { folder_id: state.current, youtube_url: r.url, title: r.title,
-        date: r.date, start: r.start || null, end: r.end || null, intro_id: intro === "" ? null : +intro } });
-      batch = batch.filter((x) => x !== r);
-      ok++;
-    } catch (err) { r.error = err.message; }
-    renderBatch();
-  }
+  try {
+    for (const r of [...batch]) {
+      try {
+        const intro = introFor(r);
+        const err = checkRow(r);
+        if (err) throw new Error(err);
+        await api("/api/jobs", { method: "POST", body: { folder_id: folder, ...(r.kind === "file" ? { upload_id: r.uploadId } : { youtube_url: r.url }),
+          title: r.title, date: r.date, start: r.start || null, end: r.end || null, intro_id: intro === "" ? null : +intro } });
+        batch = batch.filter((x) => x !== r);
+        ok++;
+      } catch (err) { r.error = err.message; }
+      renderBatch();
+    }
+  } finally { batchRunning = false; }
   saveBatch();
   if (ok) toast(`${ok} traitement(s) ajouté(s) à la file`, "ok");
   const failed = batch.filter((r) => r.error);
   if (failed.length) alertBox({ title: `${failed.length} ligne(s) non lancée(s)`, kind: "danger",
     message: "Elles restent dans la liste avec leur erreur : modifiez-les puis relancez." });
-  loadJobs(); loadStatus();
+  loadJobs(); loadFolders(); loadStatus();
 });
 $("batchDate").value = form.date.value;
 renderBatch();

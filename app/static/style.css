@@ -409,6 +409,7 @@ body { background: radial-gradient(900px 400px at 85% -5%, color-mix(in srgb, va
 .move-list label:hover { background: var(--bg); }
 .move-list .ico { width: 15px; height: 15px; vertical-align: 0; color: var(--accent); }
 @media (max-width: 820px) { .explorer-bar { flex-wrap: wrap; } .explorer-bar .search { width: 100%; order: 5; } .explorer.list .list-head, .explorer.list .item { grid-template-columns: 34px 1fr 90px; } .explorer.list .list-head span:nth-child(n+4), .explorer.list .item .c-type, .explorer.list .item .c-date { display: none; } }
+.pill.off { background: rgba(255, 90, 100, .22); color: #ffb3b8; }
 .pill.err { background: rgba(255, 90, 100, .22); color: #ffb3b8; }
 .page-link { font-size: 12px; font-weight: 500; text-decoration: none; color: var(--accent); align-self: flex-start; }
 .page-link:hover { text-decoration: underline; }
@@ -494,3 +495,13 @@ body { background: radial-gradient(900px 400px at 85% -5%, color-mix(in srgb, va
 .mode-switch button.active { background: var(--panel); color: var(--accent); box-shadow: var(--shadow); }
 .mode-switch .ico { width: 17px; height: 17px; vertical-align: 0; }
 #batchPanel { margin-top: 0; }
+
+/* Lot : intro par ligne, progression de l'envoi d'un fichier */
+.batch-row .r-intro { grid-column: 2 / 4; display: flex; align-items: center; gap: 8px; color: var(--muted); }
+.batch-row .r-intro .ico { width: 14px; height: 14px; vertical-align: 0; }
+.batch-row .r-intro select { flex: 1; min-width: 0; max-width: 360px; padding: 5px 8px; font-size: 12px; border-radius: 8px; }
+.batch-row .u .ico { width: 12px; height: 12px; vertical-align: -2px; }
+.batch-prog { grid-column: 2 / 4; height: 6px; background: var(--border); border-radius: 99px; overflow: hidden; }
+.batch-prog i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 55%, #fff)); transition: width .3s; }
+#batchPanel .source-switch { align-self: flex-start; }
+button.pill { border: 0; font: inherit; }
