@@ -13,7 +13,7 @@ import threading
 from datetime import datetime
 
 from . import config, storage
-from .db import Folder, Job, R2Marker, SessionLocal, folder_path
+from .db import EnVersion, Folder, Job, R2Marker, SessionLocal, folder_path
 
 log = logging.getLogger("r2sync")
 _BAD = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
@@ -36,6 +36,20 @@ def folder_prefix(s, folder: Folder | None) -> str:
 
 def display_filename(job: Job) -> str:
     return f"{sanitize(job.title)}_{job.date}.mp3"
+
+
+def display_filename_en(job: Job) -> str:
+    """Nom du MP3 anglais : celui du podcast français, suffixé _EN."""
+    return f"{sanitize(job.title)}_{job.date}_EN.mp3"
+
+
+def desired_key_en(s, job: Job, taken: set[str] | None = None) -> str:
+    """Chemin voulu de la version anglaise : dans le même dossier que le podcast français, sans écraser un autre fichier."""
+    if taken is None:
+        taken = {k for (k,) in s.query(Job.r2_key_mp3).filter(Job.r2_key_mp3.isnot(None))}
+        taken |= {k for (k,) in s.query(EnVersion.r2_key_mp3).filter(EnVersion.r2_key_mp3.isnot(None), EnVersion.job_id != job.id)}
+    folder = s.get(Folder, job.folder_id)
+    return _unique(f"{folder_prefix(s, folder)}/{display_filename_en(job)}".lstrip("/"), taken)
 
 
 def _unique(candidate: str, taken: set[str]) -> str:
@@ -82,6 +96,29 @@ def reconcile(s) -> dict:
         except Exception as exc:
             s.rollback()
             report["failed"].append({"job": j.id, "title": j.title, "error": str(exc)[:240]})
+    # versions anglaises : même mise en conformité (déplacement quand le dossier ou le nom change, envoi de ce qui manque)
+    for en in s.query(EnVersion).filter(EnVersion.status == "done", EnVersion.local_mp3.isnot(None)).order_by(EnVersion.id).all():
+        j = s.get(Job, en.job_id)
+        if j is None or j.deleted_at is not None:
+            continue
+        try:
+            target = desired_key_en(s, j)
+            if en.r2_key_mp3 and en.r2_key_mp3 != target:
+                storage.move(en.r2_key_mp3, target)
+                report["moved"] += 1
+            elif not en.r2_key_mp3:
+                from pathlib import Path
+                if not Path(en.local_mp3).exists():
+                    continue
+                storage.upload(Path(en.local_mp3), target, "audio/mpeg")
+                report["uploaded"] += 1
+            else:
+                continue
+            en.r2_key_mp3 = target
+            s.commit()
+        except Exception as exc:
+            s.rollback()
+            report["failed"].append({"job": j.id, "title": f"{j.title} (anglais)", "error": str(exc)[:240]})
     # dossiers (y compris vides) : un objet vide « chemin/ » par dossier
     try:
         desired = {folder_prefix(s, f) + "/" for f in s.query(Folder).filter(Folder.deleted_at.is_(None))}

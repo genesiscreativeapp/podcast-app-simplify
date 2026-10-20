@@ -1,4 +1,5 @@
 """API web + interface."""
+import io
 import json
 import re
 import secrets
@@ -11,16 +12,18 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+import soundfile as sf
 from sqlalchemy import func, or_
 
-from . import auth, config, r2sync, storage, vault
+from . import auth, config, english, r2sync, storage, vault
 from .access import Access
 from .pipeline import audio
-from .db import (AI_SERVER, DEFAULT_MODEL, MAX_PARALLEL_LIMIT, AiUsage, Folder, FolderAccess, Intro, Job, Setting, SessionLocal, User,
+from .db import (AI_SERVER, DEFAULT_MODEL, MAX_PARALLEL_LIMIT, AiUsage, EnVersion, VoiceBench, Folder, FolderAccess, Intro, Job, Setting, SessionLocal, User,
                  folder_path, ai_enabled, ai_for, get_max_parallel, has_perm, init_db, job_ai, personal_key, personal_llm,
-                 queue_position, server_llm)
+                 queue_position, server_llm, setting)
 from .pipeline import steps
 from .pipeline.detect import ask_llm
+from .voicebench import REAL_ENGINES, REF_SECONDS
 from .utils import fmt_time, parse_time, slugify
 
 STATIC = Path(__file__).parent / "static"
@@ -72,7 +75,18 @@ def job_steps(j: Job, ai: bool) -> list[dict]:
         skipped.add("upload")
     if not (config.REMOVE_OFFTOPIC and ai):
         skipped.add("clean")  # témoignages et annonces : nécessite une IA
+    if not j.condense_pct:
+        skipped.add("condense")  # durée d'origine conservée
     return steps.view(j.progress or 0.0, j.status, skipped)
+
+
+def _en_dict(en: EnVersion, full_log: bool = False) -> dict:
+    """État d'une version anglaise, pour les listes et la fenêtre de détails."""
+    return {"id": en.id, "job_id": en.job_id, "status": en.status, "step": en.step, "progress": round(en.progress or 0, 3), "mode": en.mode,
+            "translator": en.translator, "engine": en.engine, "method": en.method, "error": en.error, "ref_start": en.ref_start,
+            "has_mp3": bool(en.local_mp3 and Path(en.local_mp3).exists()), "on_r2": bool(en.r2_key_mp3), "size_mp3": en.size_mp3,
+            "duration": en.duration_output, "created_by": en.created_by, "finished_at": en.finished_at.isoformat() if en.finished_at else None,
+            "log": en.log if full_log else None}
 
 
 def job_dict(j: Job, with_log: bool = False, s=None, a: Access | None = None) -> dict:
@@ -93,11 +107,14 @@ def job_dict(j: Job, with_log: bool = False, s=None, a: Access | None = None) ->
         "on_r2": bool(j.r2_key_mp3),
         "created_at": j.created_at.isoformat() if j.created_at else None,
         "finished_at": j.finished_at.isoformat() if j.finished_at else None,
-        "ai_user": j.ai_user, "tokens_in": j.tokens_in or 0, "tokens_out": j.tokens_out or 0,
+        "english_mode": j.english_mode or "", "ai_user": j.ai_user, "condense_pct": j.condense_pct or 0, "condense_mode": j.condense_mode or "auto",
+        "tokens_in": j.tokens_in or 0, "tokens_out": j.tokens_out or 0,
         "edit_note": j.edit_note, "created_by": j.created_by, "from_upload": j.youtube_url.startswith(UPLOAD_SCHEME),
         "display_filename": r2sync.display_filename(j), "r2_key": j.r2_key_mp3,
     }
     if s is not None:
+        en = s.query(EnVersion).filter(EnVersion.job_id == j.id).first()
+        d["english"] = _en_dict(en) if en else None
         folder = s.get(Folder, j.folder_id)
         d["folder_path"] = " / ".join(folder_path(s, folder)) if folder else ""
         d["queue_position"] = queue_position(s, j) if j.status == "pending" else None
@@ -337,6 +354,9 @@ class JobIn(BaseModel):
     end: str | None = None
     intro_id: int | None = None  # None = automatique ; 0 = aucune intro
     ai_user: str | None = None  # administrateur : IA d'un autre utilisateur (ou du serveur) ; vide = celle de l'auteur
+    condense_pct: int = 0  # part de la prédication à retirer (redites, formules creuses) : 0, 10, 20 ou 30
+    condense_mode: str = "auto"  # « auto » : appliqué directement ; « review » : attend la validation de l'utilisateur
+    english: str = ""  # version anglaise : "" (non), « auto » (publiée telle quelle) ou « review » (le texte anglais est validé d'abord)
 
 
 class RetryIn(BaseModel):
@@ -344,6 +364,28 @@ class RetryIn(BaseModel):
     end: str | None = None
     intro_id: int | None = None  # pris en compte seulement s'il est envoyé
     ai_user: str | None = None  # idem
+    condense_pct: int | None = None  # pris en compte seulement s'ils sont envoyés
+    condense_mode: str | None = None
+    english: str | None = None
+
+
+CONDENSE_PCT = (0, 10, 20, 30)
+
+
+def _check_condense(pct: int, mode: str) -> tuple[int, str]:
+    if pct not in CONDENSE_PCT:
+        raise HTTPException(400, "Réduction de la durée : 0, 10, 20 ou 30 %")
+    if mode not in ("auto", "review"):
+        raise HTTPException(400, "Validation des coupes : automatique ou manuelle")
+    return pct, mode
+
+
+def _check_english(a: Access, mode: str) -> str:
+    if mode not in ("", "auto", "review"):
+        raise HTTPException(400, "Version anglaise : non, automatique ou avec validation du texte")
+    if mode and not has_perm(a.user, "english.create"):
+        raise HTTPException(403, "Vous n'avez pas la permission de générer la version anglaise")
+    return mode
 
 
 def _check_ai_user(s, a: Access, value: str | None) -> str | None:
@@ -459,10 +501,10 @@ def _staged(upload_id: str, user: User) -> tuple[Path, dict]:
 
 
 def _job_from_staged(s, a: Access, user: User, upload_id: str, folder_id: int, title: str, day: str,
-                     start, end, intro, ai_user=None) -> Job:
+                     start, end, intro, ai_user=None, condense=(0, "auto"), english_mode="") -> Job:
     """Crée le traitement et lui donne le fichier en attente comme audio source (même suite que pour un lien)."""
     d, meta = _staged(upload_id, user)
-    job = Job(folder_id=folder_id, intro_id=intro, ai_user=ai_user, created_by=user.username,
+    job = Job(folder_id=folder_id, intro_id=intro, ai_user=ai_user, condense_pct=condense[0], condense_mode=condense[1], english_mode=english_mode, created_by=user.username,
               youtube_url=f"{UPLOAD_SCHEME}{meta['name']}", video_title=Path(meta["name"]).stem, title=title, date=day,
               filename=f"{slugify(title)}_{day}", start_override=start, end_override=end)
     s.add(job)
@@ -515,15 +557,18 @@ def delete_upload(upload_id: str, request: Request):
 def create_job(body: JobIn, request: Request, s=Depends(db), a: Access = Depends(acl)):
     a.need_folder(body.folder_id)
     ai_user = _check_ai_user(s, a, body.ai_user)
+    condense = _check_condense(body.condense_pct, body.condense_mode)
+    english_mode = _check_english(a, body.english)
     if body.upload_id:
         title, day, start, end = _job_fields(body.title, body.date, body.start, body.end, body.intro_id, s)
-        job = _job_from_staged(s, a, request.state.user, body.upload_id, body.folder_id, title, day, start, end, body.intro_id, ai_user)
+        job = _job_from_staged(s, a, request.state.user, body.upload_id, body.folder_id, title, day, start, end, body.intro_id, ai_user, condense, english_mode)
         return job_dict(job, s=s, a=a)
     url = body.youtube_url.strip()
     if not url.startswith(("http://", "https://")):
         raise HTTPException(400, "Lien YouTube invalide")
     title, day, start, end = _job_fields(body.title, body.date, body.start, body.end, body.intro_id, s)
-    job = Job(folder_id=body.folder_id, intro_id=body.intro_id, ai_user=ai_user, created_by=request.state.user.username, youtube_url=url, title=title, date=day,
+    job = Job(folder_id=body.folder_id, intro_id=body.intro_id, ai_user=ai_user, condense_pct=condense[0], condense_mode=condense[1], english_mode=english_mode,
+              created_by=request.state.user.username, youtube_url=url, title=title, date=day,
               filename=f"{slugify(title)}_{day}", start_override=start, end_override=end)
     s.add(job)
     s.commit()
@@ -533,10 +578,13 @@ def create_job(body: JobIn, request: Request, s=Depends(db), a: Access = Depends
 @app.post("/api/jobs/upload", dependencies=[Depends(auth.need("jobs.create"))])
 def create_job_from_file(request: Request, file: UploadFile = File(...), folder_id: int = Form(...), title: str = Form(""),
                          date: str = Form(""), start: str = Form(""), end: str = Form(""), intro_id: str = Form(""), ai_user: str = Form(""),
+                         condense_pct: int = Form(0), condense_mode: str = Form("auto"), english: str = Form(""),
                          s=Depends(db), a: Access = Depends(acl)):
     """Traitement individuel à partir d'un fichier audio/vidéo envoyé (au lieu d'un lien YouTube) : envoi puis rattachement."""
     a.need_folder(folder_id)
     ai_user = _check_ai_user(s, a, ai_user)
+    condense = _check_condense(condense_pct, condense_mode)
+    english_mode = _check_english(a, english)
     try:
         intro = None if intro_id == "" else int(intro_id)
     except ValueError:
@@ -546,7 +594,7 @@ def create_job_from_file(request: Request, file: UploadFile = File(...), folder_
     user = request.state.user
     meta = _stage_file(file, user.username)
     try:
-        job = _job_from_staged(s, a, user, meta["id"], folder_id, title, day, start_s, end_s, intro, ai_user)
+        job = _job_from_staged(s, a, user, meta["id"], folder_id, title, day, start_s, end_s, intro, ai_user, condense, english_mode)
     except BaseException:
         shutil.rmtree(config.STAGING_DIR / meta["id"], ignore_errors=True)
         raise
@@ -558,7 +606,7 @@ def history(q: str = "", status: str = "", limit: int = 50, offset: int = 0, s=D
     """Historique de tous les traitements, tous dossiers confondus (le plus récent d'abord)."""
     query = a.jobs(s.query(Job))
     if status == "active":
-        query = query.filter(Job.status.in_(["pending", "running"]))
+        query = query.filter(Job.status.in_(["pending", "running", "review"]))
     elif status in ("done", "error"):
         query = query.filter(Job.status == status)
     if q.strip():
@@ -584,9 +632,190 @@ def get_job(job_id: int, s=Depends(db), a: Access = Depends(acl)):
         d["intro_name"] = ("Aucune" if job.intro_id == 0 else
                            (s.get(Intro, job.intro_id).name if job.intro_id and s.get(Intro, job.intro_id)
                             else "Automatique (dossier ou par défaut)"))
+    if a.admin and d.get("english"):
+        d["english_log"] = s.get(EnVersion, d["english"]["id"]).log
     d["links_public"] = bool(config.R2_PUBLIC_BASE_URL)
     d["links_days"] = max(config.R2_LINK_EXPIRES // 86400, 1)
     return d
+
+
+# --- Validation des coupes de condensation --------------------------------------------------------------------
+def _review_job(s, a: Access, job_id: int) -> tuple[Job, dict]:
+    job = a.need_job(s, job_id, edit=True)
+    if job.status != "review" or not job.review_json:
+        raise HTTPException(400, "Ce traitement n'attend pas de validation")
+    return job, json.loads(job.review_json)
+
+
+@app.get("/api/jobs/{job_id}/review", dependencies=[Depends(auth.need("jobs.view"))])
+def get_review(job_id: int, s=Depends(db), a: Access = Depends(acl)):
+    """Phrases, coupes proposées (avec la raison) et points clés, pour que l'utilisateur décide de ce qui part."""
+    job, rv = _review_job(s, a, job_id)
+    return {"title": job.title, **{k: rv[k] for k in ("pct", "method", "target_s", "total_s", "saved_s", "key_points", "sentences", "removed", "chosen")}}
+
+
+class ReviewIn(BaseModel):
+    removed: list[int]  # phrases à retirer : celles proposées que l'utilisateur garde dans la liste, et celles qu'il ajoute
+
+
+@app.post("/api/jobs/{job_id}/review", dependencies=[Depends(auth.need("jobs.create"))])
+def post_review(job_id: int, body: ReviewIn, s=Depends(db), a: Access = Depends(acl)):
+    """Valide les coupes : le traitement reprend aussitôt après la condensation, sans rien refaire."""
+    job, rv = _review_job(s, a, job_id)
+    rv["chosen"] = sorted(set(body.removed) & {x["id"] for x in rv["sentences"]})
+    job.review_json, job.review_ok = json.dumps(rv), True
+    job.status, job.step, job.error = "pending", "Validé : reprise du montage", None
+    job.updated_at = job.created_at or datetime.utcnow()  # il a déjà attendu : il repart devant les nouveaux
+    job.log = (job.log or "") + f"[{datetime.now():%H:%M:%S}] Coupes validées : {len(rv['chosen'])} phrase(s) retirée(s) sur {len(rv['removed'])} proposée(s)\n"
+    s.commit()
+    return job_dict(job, s=s, a=a)
+
+
+@app.get("/api/jobs/{job_id}/review/clip", dependencies=[Depends(auth.need("jobs.view"))])
+def review_clip(job_id: int, start: float, end: float, s=Depends(db), a: Access = Depends(acl)):
+    """Extrait de l'audio nettoyé (60 s au plus) pour écouter une phrase avant de décider de la retirer."""
+    _review_job(s, a, job_id)
+    path = config.WORK_DIR / str(job_id) / "clean.wav"
+    if not path.exists():
+        raise HTTPException(404, "Audio indisponible : relancez le traitement")
+    with sf.SoundFile(str(path)) as f:
+        a0 = max(int(max(start, 0) * f.samplerate), 0)
+        f.seek(min(a0, f.frames))
+        data = f.read(min(max(int((end - max(start, 0)) * f.samplerate), 0), 60 * f.samplerate), dtype="float32")
+        buf = io.BytesIO()
+        sf.write(buf, data, f.samplerate, format="WAV", subtype="PCM_16")
+    return Response(buf.getvalue(), media_type="audio/wav", headers={"Cache-Control": "no-store"})
+
+
+# --- Version anglaise d'un podcast : traduction + voix du prédicateur, calculées par le service voicelab ---------------
+def _english(s, a: Access, job_id: int, edit: bool = False) -> tuple[Job, EnVersion | None]:
+    job = a.need_job(s, job_id, edit=edit)
+    return job, s.query(EnVersion).filter(EnVersion.job_id == job.id).first()
+
+
+@app.get("/api/english", dependencies=[Depends(auth.need("jobs.view"))])
+def english_info(request: Request, s=Depends(db), a: Access = Depends(acl)):
+    """Réglages par défaut, état du service de voix, et les versions anglaises en cours ou à valider (visibles par cet utilisateur)."""
+    ens = (s.query(EnVersion).filter(EnVersion.status.in_(["pending", "running", "review"]), EnVersion.job_id.in_(a.jobs(s.query(Job.id))))
+           .order_by(EnVersion.created_at).all())
+    jobs = {j.id: j for j in s.query(Job).filter(Job.id.in_([e.job_id for e in ens]))} if ens else {}
+    return {"alive": _voicelab_alive(s), "defaults": english.defaults(s), "can_create": has_perm(request.state.user, "english.create"),
+            "claude_available": ai_for(s, request.state.user.username) is not None,
+            "translators": english.TRANSLATORS, "engines": {k: f"{v[0]} — {v[1]}" for k, v in REAL_ENGINES.items()},
+            "active": [{**_en_dict(e), "title": jobs[e.job_id].title, "date": jobs[e.job_id].date, "can_edit": a.owns_job(jobs[e.job_id]),
+                        "folder_path": " / ".join(folder_path(s, s.get(Folder, jobs[e.job_id].folder_id)))} for e in ens]}
+
+
+class EnglishSettingsIn(BaseModel):
+    translator: str
+    engine: str
+
+
+@app.put("/api/english/settings", dependencies=[Depends(auth.need("admin"))])
+def put_english_settings(body: EnglishSettingsIn, s=Depends(db)):
+    """Traducteur et moteur de voix par défaut des versions anglaises (modifiables à chaque demande)."""
+    if body.translator not in english.TRANSLATORS or body.engine not in REAL_ENGINES:
+        raise HTTPException(400, "Traducteur ou moteur de voix inconnu")
+    english.save_defaults(s, body.translator, body.engine)
+    return english.defaults(s)
+
+
+class EnglishIn(BaseModel):
+    mode: str = "review"  # « auto » : publiée telle quelle ; « review » : le texte anglais est validé avant la voix
+    translator: str | None = None  # défaut : le réglage de l'administrateur
+    engine: str | None = None
+    ref_start: float | None = None  # début (s) de la voix de référence dans le podcast ; vide : choisi automatiquement
+
+
+@app.post("/api/jobs/{job_id}/english", dependencies=[Depends(auth.need("english.create"))])
+def request_english(job_id: int, body: EnglishIn, s=Depends(db), a: Access = Depends(acl)):
+    """Demande (ou redemande, en remplaçant la précédente) la version anglaise d'un podcast terminé."""
+    job, en = _english(s, a, job_id, edit=True)
+    if job.status != "done" or not job.local_mp3 or not Path(job.local_mp3).exists():
+        raise HTTPException(400, "Seul un podcast terminé peut avoir une version anglaise")
+    if body.mode not in ("auto", "review"):
+        raise HTTPException(400, "Mode : automatique ou avec validation du texte")
+    if en and en.status == "running":
+        raise HTTPException(400, "La version anglaise est en cours de calcul")
+    d = english.defaults(s)
+    translator, engine = body.translator or d["translator"], body.engine or d["engine"]
+    if translator not in english.TRANSLATORS or engine not in REAL_ENGINES:
+        raise HTTPException(400, "Traducteur ou moteur de voix inconnu")
+    if translator == "claude" and ai_for(s, a.user.username) is None:
+        raise HTTPException(400, "Claude n'est pas disponible pour vous : choisissez le modèle local, ou configurez une IA")
+    if body.ref_start is not None and not 0 <= body.ref_start <= (job.duration_output or 0) - REF_SECONDS:
+        raise HTTPException(400, f"La voix de référence ({int(REF_SECONDS)} s) doit tenir dans le podcast")
+    english.queue(s, job, body.mode, a.user.username, translator, engine, body.ref_start)
+    return job_dict(job, s=s, a=a)
+
+
+def _en_review(s, a: Access, job_id: int) -> tuple[Job, EnVersion]:
+    job, en = _english(s, a, job_id, edit=True)
+    if not en or en.status != "review" or not en.text_json:
+        raise HTTPException(400, "Aucun texte anglais à valider")
+    return job, en
+
+
+@app.get("/api/jobs/{job_id}/english/review", dependencies=[Depends(auth.need("jobs.view"))])
+def get_english_review(job_id: int, s=Depends(db), a: Access = Depends(acl)):
+    """Le texte français et sa traduction, phrase par phrase, à relire et corriger avant que la voix ne le dise."""
+    job, en = _en_review(s, a, job_id)
+    return {"title": job.title, "method": en.method, "engine": en.engine, "sentences": json.loads(en.text_json)}
+
+
+class EnglishReviewIn(BaseModel):
+    texts: dict[int, str]  # numéro de phrase → texte anglais (corrigé ou non) ; vide : la phrase est retirée
+
+
+@app.post("/api/jobs/{job_id}/english/review", dependencies=[Depends(auth.need("english.create"))])
+def post_english_review(job_id: int, body: EnglishReviewIn, s=Depends(db), a: Access = Depends(acl)):
+    """Valide le texte anglais : la voix du prédicateur le dira tel quel. Le calcul reprend aussitôt."""
+    job, en = _en_review(s, a, job_id)
+    text = json.loads(en.text_json)
+    for t in text:
+        if t["id"] in body.texts:
+            t["en"] = body.texts[t["id"]].strip()[:2000]
+    if not any(t["en"] for t in text):
+        raise HTTPException(400, "Le texte anglais est vide")
+    en.text_json, en.review_ok = json.dumps(text, ensure_ascii=False), True
+    en.status, en.step = "pending", "Texte validé : la voix va être générée"
+    en.log = (en.log or "") + f"[{datetime.now():%H:%M:%S}] Texte anglais validé par {a.user.username} : {sum(1 for t in text if t['en'])} phrase(s) sur {len(text)}\n"
+    s.commit()
+    return job_dict(job, s=s, a=a)
+
+
+@app.get("/api/jobs/{job_id}/english/file", dependencies=[Depends(auth.need("jobs.view"))])
+def english_file(job_id: int, download: bool = False, s=Depends(db), a: Access = Depends(acl)):
+    job, en = _english(s, a, job_id)
+    if not en or not en.local_mp3 or not Path(en.local_mp3).exists():
+        raise HTTPException(404, "Version anglaise indisponible")
+    return FileResponse(en.local_mp3, media_type="audio/mpeg", filename=r2sync.display_filename_en(job) if download else None)
+
+
+@app.get("/api/jobs/{job_id}/english/link", dependencies=[Depends(auth.need("jobs.view"))])
+def english_link(job_id: int, s=Depends(db), a: Access = Depends(acl)):
+    _, en = _english(s, a, job_id)
+    if not en or not en.r2_key_mp3 or not storage.enabled():
+        raise HTTPException(404, "Fichier absent de R2")
+    return {"url": storage.link(en.r2_key_mp3), "public": bool(config.R2_PUBLIC_BASE_URL)}
+
+
+@app.delete("/api/jobs/{job_id}/english", dependencies=[Depends(auth.need("admin"))])
+def delete_english(job_id: int, s=Depends(db), a: Access = Depends(acl)):
+    """Suppression définitive de la version anglaise (administrateur seulement) : fichiers locaux et R2 compris."""
+    _, en = _english(s, a, job_id)
+    if not en:
+        raise HTTPException(404, "Pas de version anglaise")
+    if en.status == "running":
+        raise HTTPException(400, "La version anglaise est en cours de calcul")
+    try:
+        storage.delete([en.r2_key_mp3])
+    except Exception as exc:
+        raise HTTPException(502, f"Suppression R2 impossible : {exc}")
+    english.drop_files(en)
+    s.delete(en)
+    s.commit()
+    return {"ok": True}
 
 
 class MoveIn(BaseModel):
@@ -638,6 +867,12 @@ def retry_job(job_id: int, body: RetryIn, s=Depends(db), a: Access = Depends(acl
         job.intro_id = body.intro_id
     if "ai_user" in body.model_fields_set:
         job.ai_user = _check_ai_user(s, a, body.ai_user)
+    if body.condense_pct is not None or body.condense_mode is not None:
+        job.condense_pct, job.condense_mode = _check_condense(job.condense_pct if body.condense_pct is None else body.condense_pct,
+                                                              job.condense_mode if body.condense_mode is None else body.condense_mode)
+    if body.english is not None:
+        job.english_mode = _check_english(a, body.english)
+    job.review_json, job.review_ok = None, False  # une relance repart de l'analyse : l'ancienne proposition de coupes ne vaut plus
     job.status, job.step, job.progress, job.error = "pending", "En attente", 0.0, None
     job.updated_at = datetime.utcnow()  # repart en fin de file
     job.log = (job.log or "") + f"\n--- Relancé le {datetime.now():%d/%m/%Y %H:%M} ---\n"
@@ -758,6 +993,7 @@ def _usage(s, me: str) -> dict:
 @app.get("/api/status", dependencies=[Depends(auth.need("jobs.view"))])
 def status(request: Request, s=Depends(db), a: Access = Depends(acl)):
     count = lambda st: a.jobs(s.query(Job)).filter(Job.status == st).count()
+    count_en = lambda st: s.query(EnVersion).filter(EnVersion.job_id.in_(a.jobs(s.query(Job.id))), EnVersion.status == st).count()
     user = request.state.user
     llm, own, srv = ai_for(s, user.username), personal_key(user), server_llm(s)  # l'IA telle qu'elle servira à CET utilisateur
     use = _usage(s, user.username)
@@ -766,7 +1002,8 @@ def status(request: Request, s=Depends(db), a: Access = Depends(acl)):
         "ai_available": bool(srv or own), "ai_enabled": llm is not None, "ai_personal": bool(llm and llm["owner"] != AI_SERVER),
         "ai_global": ai_enabled(s), "server_ai": srv is not None,  # IA du serveur : configurée / interrupteur de l'administrateur
         "ai_usage": {"month": use["month"]["in"] + use["month"]["out"], "total": use["total"]["in"] + use["total"]["out"]},
-        "running": count("running"), "pending": count("pending"),
+        "running": count("running"), "pending": count("pending"), "review": count("review") + count_en("review"),
+        "english": count_en("pending") + count_en("running"),
         "r2_sync": r2sync.status(),
         "max_parallel": get_max_parallel(s), "max_parallel_limit": MAX_PARALLEL_LIMIT,
         "max_upload_mb": config.MAX_UPLOAD_MB, "staging_days": config.STAGING_DAYS,
@@ -980,12 +1217,17 @@ def restore_trash(kind: str, item_id: int, s=Depends(db), a: Access = Depends(ac
 
 
 def _purge_job(s, job: Job) -> None:
+    en = s.query(EnVersion).filter(EnVersion.job_id == job.id).first()  # la version anglaise suit son podcast
     try:
-        storage.delete([job.r2_key_mp3])
+        storage.delete([job.r2_key_mp3, en.r2_key_mp3 if en else None])
     except Exception as exc:
         raise HTTPException(502, f"Suppression R2 impossible : {exc}")
+    if en:
+        english.drop_files(en)
+        s.delete(en)
     shutil.rmtree(config.OUTPUT_DIR / str(job.id), ignore_errors=True)
     shutil.rmtree(config.CACHE_DIR / str(job.id), ignore_errors=True)
+    shutil.rmtree(config.WORK_DIR / str(job.id), ignore_errors=True)
     s.delete(job)
     s.commit()  # un échec plus loin ne doit pas laisser une ligne dont le fichier R2 a déjà disparu
 
@@ -1069,6 +1311,100 @@ def set_user_folders(user_id: int, body: UserFoldersIn, s=Depends(db)):
     s.add_all(FolderAccess(folder_id=i, user_id=user_id) for i in ids)
     s.commit()
     return _user_folders(s, user)
+
+
+# --- Banc d'essai voix : essais calculés par le service optionnel voicelab ---------------------------------------
+BENCH_DIR = config.DATA_DIR / "bench"
+BENCH_FILE = re.compile(r"[A-Za-z0-9_-]+\.(wav|txt)")
+
+
+def _voicelab_alive(s) -> bool:
+    """Le service signale sa présence toutes les 5 s (même pendant un long calcul)."""
+    try:
+        return (datetime.utcnow() - datetime.fromisoformat(setting(s, "voicelab_seen"))).total_seconds() < 20
+    except ValueError:
+        return False
+
+
+def _run_dict(r: VoiceBench, full_log: bool = False) -> dict:
+    return {"id": r.id, "title": r.title, "status": r.status, "step": r.step, "progress": round(r.progress or 0, 3), "error": r.error,
+            "engines": r.engines.split(","), "translator": r.translator, "start": r.start, "seconds": r.seconds, "created_by": r.created_by, "has_text_en": bool(r.text_en),
+            "created_at": r.created_at.isoformat() if r.created_at else None, "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+            "report": json.loads(r.report_json) if r.report_json else None, "log": r.log if full_log else (r.log or "")[-1200:]}
+
+
+@app.get("/api/voicelab", dependencies=[Depends(auth.need("admin"))])
+def voicelab(s=Depends(db)):
+    jobs = (s.query(Job).filter(Job.status == "done", Job.deleted_at.is_(None), Job.local_mp3.isnot(None))
+            .order_by(Job.id.desc()).limit(60).all())
+    return {"alive": _voicelab_alive(s),
+            "engines": [{"id": k, "label": v[0], "note": v[1]} for k, v in REAL_ENGINES.items()],
+            "podcasts": [{"id": j.id, "title": j.title, "date": j.date, "seconds": j.duration_output or 0,
+                          "folder": " / ".join(folder_path(s, s.get(Folder, j.folder_id))) if s.get(Folder, j.folder_id) else ""}
+                         for j in jobs if Path(j.local_mp3).exists()],
+            "runs": [_run_dict(r) for r in s.query(VoiceBench).order_by(VoiceBench.id.desc()).limit(20)]}
+
+
+class BenchIn(BaseModel):
+    job_id: int
+    start: float  # début de l'extrait dans le podcast (secondes)
+    seconds: float = 180
+    ref_start: float = 5  # début de la voix de référence dans l'extrait
+    engines: list[str]
+    text_en: str | None = None  # traduction déjà prête : sans elle, Whisper puis la traduction
+    translator: str = "local"  # « local » (modèle libre, sans IA externe) ou « claude » (si une IA est disponible ; sinon, le local)
+
+
+@app.post("/api/voicelab/runs", dependencies=[Depends(auth.need("admin"))])
+def start_bench(body: BenchIn, request: Request, s=Depends(db)):
+    job = s.get(Job, body.job_id)
+    if not job or job.deleted_at or job.status != "done" or not job.local_mp3 or not Path(job.local_mp3).exists():
+        raise HTTPException(400, "Podcast indisponible : choisissez un podcast terminé")
+    total = job.duration_output or 0
+    if not 30 <= body.seconds <= 600:
+        raise HTTPException(400, "Durée de l'extrait : entre 30 secondes et 10 minutes")
+    if body.start < 0 or body.start + 30 > total:
+        raise HTTPException(400, f"L'extrait doit commencer au moins 30 s avant la fin du podcast ({int(total // 60)} min)")
+    seconds = min(body.seconds, total - body.start)
+    if not 0 <= body.ref_start <= seconds - REF_SECONDS:
+        raise HTTPException(400, f"La voix de référence ({int(REF_SECONDS)} s) doit tenir dans l'extrait")
+    engines = list(dict.fromkeys(e for e in body.engines if e in REAL_ENGINES))
+    if not engines:
+        raise HTTPException(400, "Choisissez au moins un moteur")
+    if body.translator not in english.TRANSLATORS:
+        raise HTTPException(400, "Traducteur inconnu")
+    if len(body.text_en or "") > 20000:
+        raise HTTPException(400, "Traduction trop longue (20 000 caractères maximum)")
+    run = VoiceBench(created_by=request.state.user.username, job_id=job.id, title=job.title, start=body.start, seconds=seconds,
+                     ref_start=body.ref_start, engines=",".join(engines), translator=body.translator, text_en=(body.text_en or "").strip() or None)
+    s.add(run)
+    s.commit()
+    return _run_dict(run)
+
+
+@app.get("/api/voicelab/runs/{run_id}", dependencies=[Depends(auth.need("admin"))])
+def get_bench(run_id: int, s=Depends(db)):
+    return _run_dict(s.get(VoiceBench, run_id) or _404("Essai"), full_log=True)
+
+
+@app.get("/api/voicelab/runs/{run_id}/file/{name}", dependencies=[Depends(auth.need("admin"))])
+def bench_file(run_id: int, name: str, s=Depends(db)):
+    s.get(VoiceBench, run_id) or _404("Essai")
+    path = BENCH_DIR / str(run_id) / name
+    if not BENCH_FILE.fullmatch(name) or not path.is_file():
+        raise HTTPException(404, "Fichier introuvable")
+    return FileResponse(path, media_type="audio/wav" if name.endswith(".wav") else "text/plain; charset=utf-8", headers={"Cache-Control": "no-store"})
+
+
+@app.delete("/api/voicelab/runs/{run_id}", dependencies=[Depends(auth.need("admin"))])
+def delete_bench(run_id: int, s=Depends(db)):
+    run = s.get(VoiceBench, run_id) or _404("Essai")
+    if run.status == "running":
+        raise HTTPException(400, "Essai en cours : attendez sa fin")
+    shutil.rmtree(BENCH_DIR / str(run_id), ignore_errors=True)
+    s.delete(run)
+    s.commit()
+    return {"ok": True}
 
 
 # --- Connexion et comptes ---------------------------------------------------------------------

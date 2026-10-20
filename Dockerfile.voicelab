@@ -1,0 +1,21 @@
+# Service optionnel « voicelab » : calcule la version anglaise des podcasts (traduction + voix du prédicateur) et les essais de l'écran « Voix anglaise ».
+# Image à part : PyTorch et les modèles pèsent plusieurs Go. Python 3.11, la version sur laquelle Chatterbox est testé.
+FROM python:3.11-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg libsndfile1 git build-essential ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements-voicelab.txt .
+# L'index PyTorch CPU est ajouté : pour torch, la version « +cpu » est préférée à la version CUDA de PyPI, bien plus lourde
+RUN pip install --no-cache-dir -r requirements-voicelab.txt --extra-index-url https://download.pytorch.org/whl/cpu
+
+COPY app ./app
+
+ENV DATA_DIR=/data \
+    HF_HOME=/data/models \
+    PYTHONUNBUFFERED=1
+
+VOLUME ["/data"]
+CMD ["python", "-m", "app.voicelab"]

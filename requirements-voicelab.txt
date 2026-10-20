@@ -1,0 +1,14 @@
+# Service optionnel voicelab (Dockerfile.voicelab) : le strict nécessaire à app/voicelab.py, plus PyTorch, le traducteur local (Marian)
+# et le moteur de voix (Chatterbox). boto3 : envoi de la version anglaise sur R2.
+sqlalchemy>=2.0
+httpx>=0.27
+numpy
+soundfile
+faster-whisper>=1.1
+cryptography
+boto3
+transformers
+sentencepiece
+torch
+torchaudio
+chatterbox-tts

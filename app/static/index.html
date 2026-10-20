@@ -60,6 +60,7 @@
           <button class="nav-link" data-nav="trash"><span data-ic="trash"></span> Corbeille</button>
           <button class="nav-link" data-nav="users" id="navUsers" hidden><span data-ic="users"></span> Utilisateurs</button>
           <button class="nav-link" data-nav="perms" id="navPerms" hidden><span data-ic="lock"></span> Permissions</button>
+          <button class="nav-link" data-nav="voice" id="navVoice" hidden><span data-ic="mic"></span> Voix anglaise</button>
         </nav>
       </aside>
 
@@ -144,6 +145,67 @@
             </div>
           </section>
 
+          <!-- Voix anglaise (administrateur) : réglages et banc d'essai -->
+          <section id="voiceView" hidden>
+            <div class="page-head"><h1>Voix anglaise</h1></div>
+            <p class="hint">La version anglaise d'un podcast (traduction et voix du prédicateur) est calculée par le service <b>voicelab</b>, sur le CPU de ce serveur. Ici : les réglages par défaut, et un banc d'essai pour juger la qualité et le temps de calcul avant de s'engager.</p>
+            <div class="card" id="voiceStatus"></div>
+            <div class="tabs" role="tablist" aria-label="Voix anglaise">
+              <button type="button" role="tab" data-vtab="settings" class="active" aria-selected="true">Réglages</button>
+              <button type="button" role="tab" data-vtab="bench" aria-selected="false">Banc d'essai</button>
+            </div>
+            <div data-vpane="settings">
+              <form class="card" id="enSettings">
+                <h3>Réglages par défaut</h3>
+                <label>Traduction
+                  <select name="translator" id="enTranslator"></select>
+                  <span class="hint">Le <b>modèle libre local</b> (Marian opus-mt, licence CC-BY 4.0) ne dépend d'aucune IA externe ni d'aucune clé. <b>Claude</b> traduit mieux le ton oral, mais reste une option : s'il n'est pas disponible, le modèle local prend le relais.</span>
+                </label>
+                <label>Moteur de voix
+                  <select name="engine" id="enEngine"></select>
+                  <span class="hint">Choisissez d'après le banc d'essai. Chaque demande peut en changer.</span>
+                </label>
+                <div class="dialog-foot"><button class="btn" type="submit">Enregistrer</button></div>
+              </form>
+              <div class="card">
+                <h3>Comment ça marche</h3>
+                <ol class="plist-ol">
+                  <li>Le texte du podcast <b>final</b> est repris phrase par phrase (coupes de condensation, « euh » et témoignages déjà retirés).</li>
+                  <li>Il est traduit en anglais. Avec « je valide le texte », le calcul s'arrête : vous relisez et corrigez la traduction, car la voix du prédicateur dira exactement ce texte.</li>
+                  <li>Une voix de référence de 12 secondes est choisie automatiquement dans le podcast (le passage où le prédicateur parle le plus régulièrement), ou imposée à la demande.</li>
+                  <li>Le moteur lit le texte anglais avec cette voix, morceau par morceau : un arrêt du serveur ne fait pas tout recommencer.</li>
+                  <li>Le MP3 anglais (<code>Nom_date_EN.mp3</code>) est normalisé, compressé et envoyé sur R2 à côté du français.</li>
+                </ol>
+                <p class="hint">Demandez une version anglaise dans <i>Nouveau traitement</i> (champ « Version anglaise ») ou, pour un podcast terminé, dans ses détails. Permission requise : « Générer la version anglaise ». Seul un administrateur supprime définitivement une version anglaise.</p>
+              </div>
+            </div>
+            <div data-vpane="bench" hidden>
+              <form class="card" id="voiceForm">
+                <h3>Nouvel essai</h3>
+                <div class="row">
+                  <label>Podcast <select name="job_id" id="voicePodcast" required></select></label>
+                  <label>Début de l'extrait (minutes)<input name="start" type="number" min="0" step="0.5" value="15" required></label>
+                </div>
+                <div class="row">
+                  <label>Durée de l'extrait<select name="seconds"><option value="120">2 minutes</option><option value="180" selected>3 minutes</option><option value="300">5 minutes</option></select></label>
+                  <label>Voix de référence à partir de (secondes dans l'extrait)<input name="ref_start" type="number" min="0" step="1" value="5" required></label>
+                </div>
+                <p class="hint">Le podcast commence par l'intro : choisissez un début après celle-ci, là où le prédicateur parle seul (ni chant ni réponse de l'assemblée). La voix de référence dure 12 secondes.</p>
+                <div class="d-title">Moteurs à essayer</div>
+                <div class="perm-list" id="voiceEngines"></div>
+                <label>Traduction
+                  <select name="translator" id="voiceTranslator"></select>
+                </label>
+                <label>Traduction anglaise toute prête (facultatif)
+                  <textarea name="text_en" rows="4" placeholder="Laissez vide : l'extrait est transcrit puis traduit. Ou collez ici votre traduction (une phrase par ligne)."></textarea>
+                </label>
+                <div class="dialog-foot"><button class="btn" type="submit"><span data-ic="play"></span> Lancer l'essai</button></div>
+              </form>
+              <h3 class="section-title">Essais</h3>
+              <div id="voiceRuns" class="jobs"></div>
+            </div>
+          </section>
+
           <!-- Corbeille -->
           <section id="trashView" hidden>
             <div class="page-head">
@@ -206,6 +268,29 @@
                 <label class="full" id="jobAiBox" hidden>IA utilisée
                   <select name="ai_user" id="jobAiSelect"></select>
                 </label>
+                <label class="full">Durée du podcast
+                  <select name="condense_pct" id="jobCondense">
+                    <option value="0">Durée d'origine (aucune coupe)</option>
+                    <option value="10">Raccourcir d'environ 10 %</option>
+                    <option value="20">Raccourcir d'environ 20 %</option>
+                    <option value="30">Raccourcir d'environ 30 %</option>
+                  </select>
+                  <span class="hint">Retire des phrases entières (redites, formules de remplissage), sans changer l'ordre : fonctionne avec ou sans IA.</span>
+                </label>
+                <label class="full" id="jobEnBox" hidden>Version anglaise
+                  <select name="english">
+                    <option value="">Non</option>
+                    <option value="review">Oui — je valide le texte anglais avant la voix</option>
+                    <option value="auto">Oui — publier automatiquement</option>
+                  </select>
+                  <span class="hint">Traduction et voix du prédicateur, calculées après le podcast par le service de voix : cela peut prendre plusieurs heures.</span>
+                </label>
+                <label class="full" id="jobModeBox" hidden>Coupes proposées
+                  <select name="condense_mode">
+                    <option value="auto">Les appliquer automatiquement</option>
+                    <option value="review">Me les montrer avant de publier (je valide)</option>
+                  </select>
+                </label>
                 <details class="full">
                   <summary>Options : forcer le début et la fin de la prédication</summary>
                   <div class="row">
@@ -232,6 +317,27 @@
                 </label>
                 <label id="batchAiBox" hidden>IA utilisée pour tout le lot
                   <select id="batchAiSelect"></select>
+                </label>
+                <label>Durée des podcasts du lot
+                  <select id="batchCondense">
+                    <option value="0">Durée d'origine (aucune coupe)</option>
+                    <option value="10">Raccourcir d'environ 10 %</option>
+                    <option value="20">Raccourcir d'environ 20 %</option>
+                    <option value="30">Raccourcir d'environ 30 %</option>
+                  </select>
+                </label>
+                <label id="batchEnBox" hidden>Version anglaise des podcasts du lot
+                  <select id="batchEnglish">
+                    <option value="">Non</option>
+                    <option value="review">Oui — je valide le texte anglais avant la voix</option>
+                    <option value="auto">Oui — publier automatiquement</option>
+                  </select>
+                </label>
+                <label id="batchModeBox" hidden>Coupes proposées
+                  <select id="batchMode">
+                    <option value="auto">Les appliquer automatiquement</option>
+                    <option value="review">Me les montrer avant de publier (je valide)</option>
+                  </select>
                 </label>
                 <div class="source-switch" id="batchSource" role="group" aria-label="Ajouter des liens ou des fichiers">
                   <button type="button" class="active" data-bsrc="url"><span data-ic="link"></span> Liens YouTube</button>

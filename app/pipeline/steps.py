@@ -9,8 +9,9 @@ STEPS = [
     ("detect",   "Repérage de la prédication",      0.08, 0.38),
     ("voice",    "Extraction et amélioration voix", 0.38, 0.43),
     ("words",    "Transcription mot à mot",         0.43, 0.80),
-    ("clean",    "Retrait des témoignages et annonces", 0.80, 0.85),
-    ("edit",     "Montage (silences, hésitations)", 0.85, 0.90),
+    ("clean",    "Retrait des témoignages et annonces", 0.80, 0.84),
+    ("condense", "Condensation (redites, formules creuses)", 0.84, 0.86),
+    ("edit",     "Montage (silences, hésitations)", 0.86, 0.90),
     ("master",   "Intro et volume",                 0.90, 0.94),
     ("encode",   "Compression MP3",           0.94, 0.97),
     ("upload",   "Envoi vers Cloudflare R2",        0.97, 1.00),
@@ -26,7 +27,7 @@ def view(progress: float, status: str, skipped=()) -> list[dict]:
             state, pct = "skipped", 0
         elif status == "done" or progress >= hi:
             state, pct = "done", 100
-        elif status == "pending" or progress < lo:
+        elif status in ("pending", "review") or progress < lo:  # en attente de validation : le montage n'a pas commencé
             state, pct = "pending", 0
         else:
             state = "error" if status == "error" else "active"

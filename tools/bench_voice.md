@@ -1,4 +1,6 @@
-# Banc d'essai : voix du prédicateur en anglais
+# Banc d'essai : voix du prédicateur en anglais (ligne de commande)
+
+> L'application propose la même chose avec une interface : menu **Banc d'essai voix** (voir le README), avec le service optionnel `voicelab`. Ce mode d'emploi sert quand on préfère la ligne de commande, ou pour essayer OpenVoice.
 
 But : savoir, **avant d'intégrer quoi que ce soit**, si un modèle libre sait refaire en anglais la voix du prédicateur, et en
 combien de temps sur **votre** serveur. Le script `tools/bench_voice.py` ne touche ni à l'application ni à ses données.
@@ -10,9 +12,9 @@ moteur demandé avec la voix de référence prise dans l'extrait. Il affiche les
 
 - Un sermon : le plus simple est de télécharger un **podcast déjà produit** depuis l'application (« Télécharger MP3 »).
   Choisissez un passage où le prédicateur parle seul, **sans musique ni réponse de l'assemblée**.
-- Pour traduire : une clé Anthropic **à vous**, dans la variable d'environnement `ANTHROPIC_API_KEY` (rien n'est écrit sur disque).
-  Sans clé : lancez le script une première fois, collez `bench_out/fr.txt` dans un chat avec Claude (« traduis en anglais,
-  une phrase courte par ligne »), enregistrez le résultat dans `en.txt` et ajoutez `--text-en en.txt`.
+- Pour traduire : **rien**, par défaut : un modèle libre local (`--translator local`, installé avec `transformers` et `sentencepiece`).
+  Claude est une option (`--translator claude`, avec une clé Anthropic **à vous** dans `ANTHROPIC_API_KEY`, rien n'est écrit sur disque).
+  Vous pouvez aussi fournir votre traduction (une phrase par ligne) avec `--text-en en.txt`.
 - Quelques Go d'espace disque : PyTorch et les modèles se téléchargent à la première utilisation.
 
 ## Chatterbox (à essayer en premier : MIT, la variante « nano » est annoncée utilisable sur CPU)
@@ -27,7 +29,7 @@ puis, dans le conteneur :
 
 ```bash
 apt-get update && apt-get install -y ffmpeg libsndfile1 git build-essential
-pip install faster-whisper httpx soundfile numpy
+pip install faster-whisper httpx soundfile numpy transformers sentencepiece
 pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu   # évite la version CUDA, très lourde
 pip install chatterbox-tts
 python tools/bench_voice.py sermon.mp3 --start 900 --seconds 180 --engines chatterbox-nano,chatterbox-turbo,chatterbox

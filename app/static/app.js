@@ -12,7 +12,7 @@ const can = (p) => !!state.me && (state.me.is_admin || state.me.permissions.incl
 const fmtSize = (b) => (b ? (b / 1e6).toFixed(1) + " Mo" : "");
 const fmtDate = (iso) => iso ? new Date(/Z|[+-]\d\d:\d\d$/.test(iso) ? iso : iso + "Z")
   .toLocaleString("fr-FR", { dateStyle: "medium", timeStyle: "short" }) : "—";
-const LABELS = { pending: "En attente", running: "En cours", done: "Terminé", error: "Erreur" };
+const LABELS = { pending: "En attente", running: "En cours", review: "À valider", done: "Terminé", error: "Erreur" };
 
 try { JSON.parse(localStorage.getItem("expanded") || "[]").forEach((id) => state.expanded.add(id)); } catch {}
 const saveExpanded = () => { try { localStorage.setItem("expanded", JSON.stringify([...state.expanded])); } catch {} };
@@ -248,11 +248,12 @@ async function startApp() {
   $("app").hidden = false;
   $("boot").hidden = true;
   paintUser();
-  $("navUsers").hidden = $("navPerms").hidden = !state.me.is_admin;
+  $("navUsers").hidden = $("navPerms").hidden = $("navVoice").hidden = !state.me.is_admin;
   $("menuAi").hidden = !(can("ai.key") || can("ai.toggle"));
   $("emptyNewBtn").hidden = !can("folders.manage");
   $("parallelBox").hidden = !can("settings.manage");
   $("introForm").hidden = !can("intros.manage");
+  $("jobEnBox").hidden = $("batchEnBox").hidden = !can("english.create");
   await Promise.all([loadFolders(), loadIntros(), loadAiUsers()]);
   await syncBatchUploads();
   loadStatus();
@@ -265,7 +266,7 @@ function route() {
   const h = location.hash.slice(1);
   if (/^\d+$/.test(h) && byId(+h)) return go("folders", +h);
   if (h === "folders") return go("folders");
-  if (h === "history" || h === "intros" || h === "trash" || ((h === "users" || h === "perms") && state.me.is_admin)) return go(h);
+  if (h === "history" || h === "intros" || h === "trash" || ((h === "users" || h === "perms" || h === "voice") && state.me.is_admin)) return go(h);
   return go("home");
 }
 
@@ -274,7 +275,7 @@ async function go(view, id = null) {
   state.current = view === "folders" ? id : null;
   const hash = view === "folders" ? (id ? String(id) : "folders") : view;
   if (location.hash.slice(1) !== hash) history.replaceState(null, "", "#" + hash);
-  for (const v of ["home", "folders", "history", "intros", "users", "perms", "trash"]) $(v + "View").hidden = v !== view;
+  for (const v of ["home", "folders", "history", "intros", "users", "perms", "trash", "voice"]) $(v + "View").hidden = v !== view;
   document.querySelectorAll(".nav-link").forEach((b) => b.classList.toggle("active", b.dataset.nav === view));
   $("sidebar").classList.remove("open");
   if (view === "home") await loadHome();
@@ -282,6 +283,7 @@ async function go(view, id = null) {
   else if (view === "intros") { renderIntroList(); await loadIntros(); }
   else if (view === "users") await loadUsers();
   else if (view === "perms") await loadPerms();
+  else if (view === "voice") await loadVoice();
   else if (view === "trash") await loadTrash();
   else if (view === "folders") { state.jobs = []; state.sel = null; $("newJobPanel").hidden = true; $("foldSearch").value = ""; renderExplorer(); await loadJobs(); }
 }
@@ -302,17 +304,19 @@ async function tick() {
   if (!state.me) return;
   if (document.visibilityState === "visible") {
     const s = await loadStatus();
-    const active = s ? s.running + s.pending : 0;
+    const active = s ? s.running + s.pending + (s.english || 0) : 0;
     if (active > 0 || state.lastActive > 0) {
-      refreshView();
+      refreshView(true);
       if (state.view !== "folders") loadFolders();
     }
     state.lastActive = active;
   }
   state.timers.tick = setTimeout(tick, 3000);
 }
-function refreshView() {
-  if (state.view === "home") loadHome(true);
+// `poll` : rafraîchissement automatique (toutes les 3 s), qui évite de tout recharger si rien n'a bougé ;
+// sinon (après une action : suppression, renommage, relance…), la page est toujours relue en entier.
+function refreshView(poll = false) {
+  if (state.view === "home") loadHome(true, !poll);
   else if (state.view === "history") loadHistory(false, true);
   else if (state.view === "folders") { loadJobs(); loadFolders(); }
   if (state.detail && $("detailDialog").open) openDetail(state.detail.id, true);
@@ -329,10 +333,10 @@ function keepPlayers(box, html) {  // remplace le HTML sans couper un lecteur au
     else if (slot.dataset.auto !== undefined) slot.replaceWith(makePlayer(slot.dataset.player, false));
   });
 }
-function makePlayer(id, autoplay) {
+function makePlayer(id, autoplay, lang = "fr") {
   const a = document.createElement("audio");
-  a.controls = true; a.preload = autoplay ? "auto" : "none"; a.dataset.job = id;
-  a.src = `/api/jobs/${id}/file/mp3`;
+  a.controls = true; a.preload = autoplay ? "auto" : "none"; a.dataset.job = id; a.dataset.lang = lang;
+  a.src = lang === "en" ? `/api/jobs/${id}/english/file` : `/api/jobs/${id}/file/mp3`;
   if (autoplay) a.autoplay = true;
   return a;
 }
@@ -375,10 +379,26 @@ function liveBlock(j) {  // rang dans la file, ou barre globale s'il tourne
 
 const isLive = (j) => j.status === "pending" || j.status === "running";
 
+// Version anglaise : état à côté du podcast, et les actions utiles directement dans la liste
+const EN_LABEL = { pending: "en attente", running: "en cours", review: "à valider", done: "prête", error: "erreur" };
+const enBadge = (j) => j.english ? `<span class="badge ${j.english.status}" title="Version anglaise : ${EN_LABEL[j.english.status]}">EN · ${EN_LABEL[j.english.status]}${j.english.status === "running" ? ` ${Math.round(j.english.progress * 100)} %` : ""}</span>` : "";
+const canEnglish = (j) => j.status === "done" && j.has_mp3 && can("english.create") && editable(j);
+const enActions = (j) => {
+  const e = j.english;
+  return [
+    e?.status === "review" && canEnglish(j) ? `<button class="btn small" data-act="enreview" data-id="${j.id}">${ic("edit")} Relire l'anglais</button>` : "",
+    e?.has_mp3 ? `<button class="btn small ghost" data-act="enplay" data-id="${j.id}">${ic("play")} Écouter EN</button>
+      <a class="btn small ghost" href="/api/jobs/${j.id}/english/file?download=true">${ic("download")} MP3 EN</a>` : "",
+    canEnglish(j) && (!e || e.status === "error") ? `<button class="btn small ghost" data-act="english" data-id="${j.id}">${ic("sparkle")} Version anglaise…</button>` : "",
+  ].join("");
+};
+
 const editable = (j) => j.can_edit !== false;  // le serveur refuse de toute façon : on ne propose pas ce qui échouerait
 function jobActions(j, { detail = true, play = false } = {}) {
   return `<div class="actions">
     ${play && j.has_mp3 ? `<button class="btn small ghost" data-act="play" data-id="${j.id}">${ic("play")} Écouter</button>` : ""}
+    ${j.status === "review" && can("jobs.create") && editable(j) ? `<button class="btn small" data-act="review" data-id="${j.id}">${ic("scissors")} Relire les coupes</button>` : ""}
+    ${enActions(j)}
     ${j.has_mp3 ? `<a class="btn small" href="/api/jobs/${j.id}/file/mp3?download=true">${ic("download")} Télécharger MP3</a>` : ""}
     ${j.on_r2 ? `<button class="btn small ghost" data-act="link" data-id="${j.id}">${ic("link")} Copier le lien</button>` : ""}
     ${detail ? `<button class="btn small ghost" data-act="detail" data-id="${j.id}">${ic("info")} Détails</button>` : ""}
@@ -398,6 +418,14 @@ function activeCard(j) {
       <div class="ac-sub">${sub}</div>`;
   const actions = `<div class="ac-actions"><span class="by">${j.from_upload ? ic("upload") + " Fichier envoyé" : ""}</span>
       <button class="btn small ghost" data-act="detail" data-id="${j.id}">${ic("info")} Détails</button></div>`;
+  if (j.status === "review") {
+    const mine = can("jobs.create") && editable(j);
+    return `<div class="active-card review" data-id="${j.id}">
+      <div class="ring review"><b>✋</b></div>
+      ${head}<div class="ac-step"><b>À valider</b> <small>· ${j.condense_pct} % de réduction visés : relisez les coupes proposées</small></div></div>
+      <div class="ac-actions"><span class="by"></span>${mine ? `<button class="btn small" data-act="review" data-id="${j.id}">${ic("scissors")} Relire les coupes</button>` : ""}
+        <button class="btn small ghost" data-act="detail" data-id="${j.id}">${ic("info")} Détails</button></div></div>`;
+  }
   if (j.status === "pending") {
     return `<div class="active-card pending" data-id="${j.id}">
       <div class="ring queue"><b>n°<i>${j.queue_position}</i></b></div>
@@ -415,6 +443,25 @@ function activeCard(j) {
     ${actions}</div>`;
 }
 
+// Carte d'une version anglaise en cours, en attente ou à valider (accueil)
+function enCard(e) {
+  const head = `<div class="ac-main"><div class="ac-title">🇬🇧 ${esc(e.title)} <span class="muted">· ${esc(e.date)} · version anglaise</span></div>
+      <div class="ac-sub">${e.folder_path ? ic("folder") + " " + esc(e.folder_path) : ""}${e.created_by ? ` · par ${esc(e.created_by)}` : ""}</div>`;
+  const detail = `<button class="btn small ghost" data-act="detail" data-id="${e.job_id}">${ic("info")} Détails</button>`;
+  if (e.status === "review") {
+    return `<div class="active-card review" data-en="${e.id}"><div class="ring review"><b>✋</b></div>${head}
+      <div class="ac-step"><b>Texte anglais à valider</b> <small>· la voix du prédicateur le dira tel quel</small></div></div>
+      <div class="ac-actions"><span class="by"></span>${e.can_edit && can("english.create") ? `<button class="btn small" data-act="enreview" data-id="${e.job_id}">${ic("edit")} Relire le texte</button>` : ""}${detail}</div></div>`;
+  }
+  if (e.status === "pending") {
+    return `<div class="active-card pending" data-en="${e.id}"><div class="ring queue"><b>EN</b></div>${head}
+      <div class="ac-step">${ic("clock")} En attente du service de voix${state.enAlive ? "" : " <small>· il n'est pas démarré</small>"}</div></div><div class="ac-actions"><span class="by"></span>${detail}</div></div>`;
+  }
+  const pct = Math.round(e.progress * 100);
+  return `<div class="active-card running" data-en="${e.id}"><div class="ring" style="--p:${pct}"><b>${pct}<small>%</small></b></div>${head}
+    <div class="ac-step"><span class="live"></span><b>${esc(e.step)}</b></div></div><div class="ac-actions"><span class="by"></span>${detail}</div></div>`;
+}
+
 // Ligne compacte (historique, liste des podcasts)
 function jobRow(j) {
   const meta = [fmtDate(j.created_at), j.duration_output && `Podcast ${j.duration_output}`,
@@ -424,7 +471,7 @@ function jobRow(j) {
       <div class="job-title">${esc(j.title)} <span class="muted">· ${esc(j.date)}</span></div>
       <div class="job-sub">${ic("folder")} ${esc(j.folder_path || "")}${j.video_title ? " · " + esc(j.video_title) : ""}</div>
     </div>
-    <span class="badge ${j.status}">${LABELS[j.status]}</span>
+    <span class="badge ${j.status}">${LABELS[j.status]}</span> ${enBadge(j)}
     ${isLive(j) ? `<div class="wide-col">${liveBlock(j)}</div>`
       : `<div class="h-meta">${meta.map((m) => `<span>${esc(m)}</span>`).join("")}</div>`}
     ${j.error ? `<div class="err-box wide-col">${esc(j.error)}</div>` : ""}
@@ -460,6 +507,23 @@ async function handleAction(act, id, btn) {
     } else if (act === "link") {
       const { url, public: pub } = await api(`/api/jobs/${id}/link/mp3`);
       await copyLink(url, pub ? "Lien public copié" : "Lien copié (valable 7 jours)");
+    } else if (act === "review") await reviewDialog(job);
+    else if (act === "english") await englishDialog(job);
+    else if (act === "enreview") await enReviewDialog(job);
+    else if (act === "enplay") {
+      const row = btn.closest(".hrow");
+      const existing = row.querySelector('audio[data-lang="en"]');
+      if (existing) { const s = document.createElement("div"); s.className = "wide-col"; s.dataset.player = id; existing.replaceWith(s); return; }
+      row.querySelector("[data-player]").replaceWith(makePlayer(id, true, "en"));
+    } else if (act === "enlink") {
+      const { url, public: pub } = await api(`/api/jobs/${id}/english/link`);
+      await copyLink(url, pub ? "Lien public (anglais) copié" : "Lien (anglais) copié (valable 7 jours)");
+    } else if (act === "endelete") {
+      if (!(await confirmBox({ title: "Supprimer la version anglaise ?", danger: true, confirmLabel: "Supprimer définitivement",
+        message: `La version anglaise de « <b>${esc(job.title)}</b> » (texte, fichier, et sur R2) sera supprimée <b>pour toujours</b>. Vous pourrez la régénérer.` }))) return;
+      await api(`/api/jobs/${id}/english`, { method: "DELETE" });
+      toast("Version anglaise supprimée", "ok");
+      refreshView();
     } else if (act === "retry") await retryDialog(job);
     else if (act === "trim") await trimDialog(job);
     else if (act === "rename") await renameJob(job);
@@ -487,18 +551,124 @@ async function retryDialog(job) {
       <div class="row"><label>Début<input name="start" placeholder="1:05:30" value="${esc(job.start_override || job.sermon_start || "")}"></label>
       <label>Fin<input name="end" placeholder="2:10:00" value="${esc(job.end_override || job.sermon_end || "")}"></label></div>
       <label>Intro<select name="intro_id">${introOptions([["keep", "Ne pas changer"], ["", "Automatique (dossier, sinon par défaut)"]], true, "keep")}</select></label>
-      ${state.me.is_admin ? `<label>IA utilisée<select name="ai_user">${aiOptions([["keep", "Ne pas changer"]], "keep")}</select></label>` : ""}`,
+      ${state.me.is_admin ? `<label>IA utilisée<select name="ai_user">${aiOptions([["keep", "Ne pas changer"]], "keep")}</select></label>` : ""}
+      <div class="row"><label>Durée du podcast<select name="condense_pct">
+          ${[["keep", "Ne pas changer"], ["0", "Durée d'origine"], ["10", "Raccourcir d'environ 10 %"], ["20", "Raccourcir d'environ 20 %"], ["30", "Raccourcir d'environ 30 %"]]
+            .map(([v, l]) => `<option value="${v}" ${v === "keep" ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+        <label>Coupes proposées<select name="condense_mode"><option value="keep" selected>Ne pas changer</option>
+          <option value="auto">Les appliquer automatiquement</option><option value="review">Me les montrer avant (je valide)</option></select></label></div>
+      ${can("english.create") ? `<label>Version anglaise<select name="english"><option value="keep" selected>Ne pas changer</option><option value="">Non</option>
+        <option value="review">Oui — je valide le texte avant la voix</option><option value="auto">Oui — publier automatiquement</option></select></label>` : ""}`,
     buttons: [{ label: "Annuler", kind: "ghost", value: null }, { label: "Relancer", primary: true }],
     submit: async (dlg) => {
       const v = (n) => dlg.querySelector(`[name=${n}]`).value;
       const body = { start: v("start"), end: v("end") };
       if (v("intro_id") !== "keep") body.intro_id = v("intro_id") === "" ? null : +v("intro_id");
       if (state.me.is_admin && v("ai_user") !== "keep") body.ai_user = v("ai_user");
+      if (v("condense_pct") !== "keep") body.condense_pct = +v("condense_pct");
+      if (v("condense_mode") !== "keep") body.condense_mode = v("condense_mode");
+      if (can("english.create") && v("english") !== "keep") body.english = v("english");
       await api(`/api/jobs/${job.id}/retry`, { method: "POST", body });
     },
   });
   if (done) { toast("Traitement relancé", "ok"); refreshView(); loadStatus(); }
 }
+
+// ---------- Version anglaise : demande et relecture du texte ----------
+async function englishDialog(job) {
+  const info = await api("/api/english"), e = job.english, d = info.defaults;
+  const opts = (map, sel, off = {}) => Object.entries(map).map(([k, l]) => `<option value="${esc(k)}" ${k === sel ? "selected" : ""} ${off[k] ? "disabled" : ""}>${esc(l)}${off[k] ? " (indisponible)" : ""}</option>`).join("");
+  const r = await modal({
+    title: `Version anglaise · ${job.title}`, icon: "🇬🇧",
+    body: `<p>Le texte du podcast final est traduit en anglais, puis lu avec <b>la voix du prédicateur</b> par le service de voix, sur le CPU du serveur : <b>cela peut prendre plusieurs heures</b> (le banc d'essai de l'administrateur mesure le temps).</p>
+      ${e?.status === "done" ? '<p class="err-box">Cette demande <b>remplacera</b> la version anglaise existante.</p>' : ""}
+      ${info.alive ? "" : '<p class="hint">Le service de voix n\'est pas démarré : la demande attendra qu\'un administrateur l\'active.</p>'}
+      <label>Texte anglais<select name="mode"><option value="review">Je le relis et le valide avant que la voix ne le dise (recommandé)</option><option value="auto">Publier automatiquement</option></select></label>
+      <label>Traduction<select name="translator">${opts(info.translators, d.translator, { claude: !info.claude_available })}</select></label>
+      <label>Moteur de voix<select name="engine">${opts(info.engines, d.engine)}</select></label>
+      <label>Voix de référence<select name="refmode"><option value="auto">Choisie automatiquement (le passage le plus régulier)</option><option value="manual">À partir d'un instant précis…</option></select></label>
+      <label hidden id="enRefBox">Début de la voix de référence (secondes dans le podcast)<input name="ref_start" type="number" min="0" step="1" value="60"></label>`,
+    buttons: [{ label: "Annuler", kind: "ghost", value: null }, { label: "Lancer", primary: true }],
+    onMount: (dlg) => { dlg.querySelector("[name=refmode]").onchange = (ev) => (dlg.querySelector("#enRefBox").hidden = ev.target.value !== "manual"); },
+    submit: (dlg) => {
+      const v = (n) => dlg.querySelector(`[name=${n}]`).value;
+      return api(`/api/jobs/${job.id}/english`, { method: "POST", body: { mode: v("mode"), translator: v("translator"), engine: v("engine"),
+        ref_start: v("refmode") === "manual" ? +v("ref_start") : null } });
+    },
+  });
+  if (r) { toast("Version anglaise mise en file d'attente", "ok"); refreshView(); loadStatus(); }
+}
+
+async function enReviewDialog(job) {
+  const rv = await api(`/api/jobs/${job.id}/english/review`);
+  const r = await modal({
+    title: `Relire le texte anglais · ${job.title}`, wide: true,
+    body: `<p class="hint">Traduit par : <b>${esc(rv.method || "?")}</b>. <b>La voix du prédicateur dira exactement ce texte</b> : relisez surtout les versets, les noms propres et les termes spirituels. Effacez le texte d'une phrase pour la retirer. ${rv.sentences.length} phrases.</p>
+      <div class="en-list" id="enList">${rv.sentences.map((t) => `<div class="en-row"><div class="en-fr">${esc(t.fr)}</div>
+        <textarea data-en="${t.id}" rows="${Math.max(2, Math.ceil(t.en.length / 70))}">${esc(t.en)}</textarea></div>`).join("")}</div>`,
+    buttons: [{ label: "Annuler", kind: "ghost", value: null }, { label: "Valider et générer la voix", primary: true }],
+    submit: (dlg) => {
+      const texts = {};
+      dlg.querySelectorAll("[data-en]").forEach((t) => (texts[t.dataset.en] = t.value));
+      return api(`/api/jobs/${job.id}/english/review`, { method: "POST", body: { texts } });
+    },
+  });
+  if (r) { toast("Texte validé : la voix va être générée", "ok"); refreshView(); loadStatus(); }
+}
+
+// ---------- Relecture des coupes de condensation ----------
+let rvAudio = null;
+const mmss = (s) => `${Math.floor(s / 60)} min ${String(Math.round(s % 60)).padStart(2, "0")} s`;
+async function reviewDialog(job) {
+  const rv = await api(`/api/jobs/${job.id}/review`);
+  const byId = new Map(rv.sentences.map((s) => [s.id, s])), why = new Map(rv.removed.map((r) => [r.id, r])), chosen = new Set(rv.chosen);
+  const cut = (id) => byId.get(id).cut[1] - byId.get(id).cut[0];
+  const saved = () => [...chosen].reduce((t, id) => t + cut(id), 0);
+  const row = (s) => `<li class="rv-row ${why.has(s.id) ? "proposed" : ""} ${chosen.has(s.id) ? "on" : ""}" data-id="${s.id}">
+      <label><input type="checkbox" data-rv="${s.id}" ${chosen.has(s.id) ? "checked" : ""}>
+        <span class="rv-time">${fmtClockShort(s.start)}</span><span class="rv-text">${esc(s.text)}</span></label>
+      ${why.has(s.id) ? `<small class="rv-why">${esc(why.get(s.id).reason)}${why.get(s.id).by === "IA" ? " · IA" : ""}</small>` : ""}
+      <button type="button" class="icon-btn" data-rv-play="${s.id}" title="Écouter cette phrase (avec 1,5 s de contexte)" aria-label="Écouter">▶</button></li>`;
+  const r = await modal({
+    title: `Coupes proposées · ${job.title}`, wide: true,
+    body: `<p class="hint">${rv.method === "heuristique"
+      ? "Sans IA : seules les redites évidentes et les formules de remplissage sont proposées ; l'objectif peut ne pas être atteint, par prudence."
+      : `Proposé par l'IA${rv.method === "IA + heuristique" ? " (complété par les redites évidentes)" : ""}.`}
+      Les phrases cochées seront <b>retirées</b>, dans l'ordre d'origine. Décochez pour garder, cochez pour en retirer d'autres. Le début, la fin, les lectures bibliques et les « Amen » sont protégés par défaut.</p>
+      ${rv.key_points?.length ? `<details class="rv-points"><summary>Idées principales repérées (vérifiez qu'elles restent toutes)</summary><ul>${rv.key_points.map((p) => `<li>${esc(p)}</li>`).join("")}</ul></details>` : ""}
+      <div class="rv-bar"><label class="check"><input type="checkbox" id="rvOnly" checked> Seulement les phrases proposées ou choisies</label><b id="rvSum"></b></div>
+      <ul class="rv-list only" id="rvList">${rv.sentences.map(row).join("")}</ul>`,
+    buttons: [{ label: "Annuler", kind: "ghost", value: null }, { label: "Tout garder (aucune coupe)", kind: "ghost", value: "keep" },
+      { label: "Valider les coupes", primary: true }],
+    onMount: (dlg) => {
+      const list = dlg.querySelector("#rvList"), sum = () => {
+        const s = saved();
+        dlg.querySelector("#rvSum").textContent = `${chosen.size} phrase(s) · −${mmss(s)} (−${(100 * s / Math.max(rv.total_s, 1)).toFixed(0)} %, objectif −${rv.pct} %)`;
+      };
+      sum();
+      dlg.querySelector("#rvOnly").onchange = (e) => list.classList.toggle("only", e.target.checked);
+      list.addEventListener("change", (e) => {
+        const id = +e.target.dataset.rv;
+        e.target.checked ? chosen.add(id) : chosen.delete(id);
+        e.target.closest(".rv-row").classList.toggle("on", e.target.checked);
+        sum();
+      });
+      list.addEventListener("click", (e) => {
+        const b = e.target.closest("[data-rv-play]");
+        if (!b) return;
+        const s = byId.get(+b.dataset.rvPlay);
+        rvAudio?.pause();
+        rvAudio = new Audio(`/api/jobs/${job.id}/review/clip?start=${Math.max(s.start - 1.5, 0)}&end=${s.end + 1.5}`);
+        rvAudio.play().catch(() => toast("Audio indisponible", true));
+      });
+    },
+    submit: (dlg) => api(`/api/jobs/${job.id}/review`, { method: "POST", body: { removed: [...chosen] } }),
+  });
+  rvAudio?.pause();
+  if (r === "keep") await api(`/api/jobs/${job.id}/review`, { method: "POST", body: { removed: [] } });
+  if (r) { toast("Coupes validées : le traitement reprend", "ok"); refreshView(); loadStatus(); }
+}
+const fmtClockShort = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 
 // ---------- Rognage du podcast terminé ----------
 const clock = (s) => { s = Math.max(0, s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
@@ -686,7 +856,8 @@ async function loadStatus() {
     ${aiPill(s)}
     ${usagePill(s)}
     <span class="pill link ${s.running ? "busy" : ""}" data-status="active">▶ ${s.running}/${s.max_parallel} en cours</span>
-    <span class="pill link ${s.pending ? "waiting" : ""}" data-status="active">⏳ ${s.pending} en file</span>`;
+    <span class="pill link ${s.pending ? "waiting" : ""}" data-status="active">⏳ ${s.pending} en file</span>
+    ${s.review ? `<span class="pill link busy" data-status="active" title="Des coupes proposées attendent votre validation">✋ ${s.review} à valider</span>` : ""}`;
   const mb = s.max_upload_mb;
   $("stagingDays").textContent = s.staging_days;
   $("maxUpload").textContent = $("batchMaxUpload").textContent = mb >= 1024 ? `${(mb / 1024).toFixed(1).replace(".0", "")} Go` : `${mb} Mo`;
@@ -729,22 +900,23 @@ function renderHomeStats() {
 let homeSearchTimer;
 $("homeSearch").oninput = () => { clearTimeout(homeSearchTimer); homeSearchTimer = setTimeout(() => loadHome(), 300); };
 
-async function loadHome(silent = false) {
+async function loadHome(silent = false, force = false) {
   if (!silent && !state.home.items) { loadingLine($("homeActive")); loadingLine($("homeDone")); }
   const q = $("homeSearch").value;
   try {
-    const act = await api("/api/jobs?status=active&limit=100");
-    const sig = act.items.map((j) => j.id + j.status).join(",");
+    const [act, en] = await Promise.all([api("/api/jobs?status=active&limit=100"), api("/api/english")]);
+    state.enAlive = en.alive;
+    const sig = act.items.map((j) => j.id + j.status).join(",") + "|" + en.active.map((e) => e.id + e.status).join(",");
     if (state.view !== "home") return;
-    $("homeActiveBox").hidden = !act.total;
-    $("homeActiveCount").textContent = act.total || "";
-    $("homeActive").innerHTML = act.items.map(activeCard).join("");
-    if (silent && sig === state.home.sig && q === state.home.q) { state.home.items = [...act.items, ...(state.home.done || [])]; return; }
+    $("homeActiveBox").hidden = !(act.total + en.active.length);
+    $("homeActiveCount").textContent = act.total + en.active.length || "";
+    $("homeActive").innerHTML = act.items.map(activeCard).join("") + en.active.map(enCard).join("");
+    if (silent && !force && sig === state.home.sig && q === state.home.q) { state.home.items = [...act.items, ...(state.home.done || [])]; return; }
     const done = await api(`/api/jobs?status=done&limit=12&q=${encodeURIComponent(q)}`);
     state.home = { sig, q, done: done.items, doneTotal: q ? state.home.doneTotal : done.total, items: [...act.items, ...done.items] };
     renderHomeStats();
     $("homeDoneCount").textContent = done.total || "";
-    const empty = !state.folders.length && !act.total && !done.total && !q;
+    const empty = !state.folders.length && !act.total && !en.active.length && !done.total && !q;
     $("emptyState").hidden = !empty;
     $("homeContent").hidden = empty;
     keepPlayers($("homeDone"), done.items.length ? done.items.map(jobRow).join("")
@@ -820,6 +992,7 @@ const plural = (n, one, many) => `${n} ${n > 1 ? many : one}`;
 function jobMeta(j) {
   if (j.status === "running") return `${Math.round(j.progress * 100)} % — ${esc(j.step)}`;
   if (j.status === "pending") return `En file n° ${j.queue_position}`;
+  if (j.status === "review") return "À valider";
   if (j.status === "error") return "Erreur";
   return [j.duration_output, fmtSize(j.size_mp3)].filter(Boolean).join(" · ");
 }
@@ -1328,7 +1501,7 @@ async function submitFile() {
   if (file.size > max) throw new Error(`Fichier trop volumineux (maximum ${fmtSize(max)})`);
   const fd = new FormData();
   fd.append("folder_id", state.current);
-  for (const k of ["title", "date", "start", "end", "intro_id", "ai_user"]) fd.append(k, form[k].value);
+  for (const k of ["title", "date", "start", "end", "intro_id", "ai_user", "condense_pct", "condense_mode", "english"]) fd.append(k, form[k].value);
   fd.append("file", file);
   $("uploadProgress").hidden = false;
   try {
@@ -1351,6 +1524,7 @@ form.onsubmit = async (e) => {
         delete body.file;
         body.folder_id = state.current;
         body.intro_id = body.intro_id === "" ? null : +body.intro_id;
+        body.condense_pct = +body.condense_pct;
         await api("/api/jobs", { method: "POST", body });
         form.youtube_url.value = "";
       }
@@ -1363,6 +1537,9 @@ form.onsubmit = async (e) => {
   });
 };
 setSource("url");
+// le choix « me montrer les coupes avant » n'a de sens que si on raccourcit
+$("jobCondense").onchange = () => ($("jobModeBox").hidden = $("jobCondense").value === "0");
+$("batchCondense").onchange = () => ($("batchModeBox").hidden = $("batchCondense").value === "0");
 
 // ---------- Traitement par lot : liens et fichiers à préparer ----------
 // Une ligne = un traitement, avec son propre nom, sa date, ses bornes et son intro.
@@ -1562,7 +1739,8 @@ $("batchRunBtn").onclick = (e) => busy(e.currentTarget, async () => {
         const err = checkRow(r);
         if (err) throw new Error(err);
         await api("/api/jobs", { method: "POST", body: { folder_id: folder, ...(r.kind === "file" ? { upload_id: r.uploadId } : { youtube_url: r.url }),
-          title: r.title, date: r.date, start: r.start || null, end: r.end || null, intro_id: intro === "" ? null : +intro, ai_user: $("batchAiSelect").value } });
+          title: r.title, date: r.date, start: r.start || null, end: r.end || null, intro_id: intro === "" ? null : +intro, ai_user: $("batchAiSelect").value,
+          condense_pct: +$("batchCondense").value, condense_mode: $("batchMode").value, english: $("batchEnglish").value } });
         batch = batch.filter((x) => x !== r);
         ok++;
       } catch (err) { r.error = err.message; }
@@ -1580,13 +1758,34 @@ $("batchDate").value = form.date.value;
 renderBatch();
 
 // ---------- Détails d'un traitement ----------
+// Bloc « Version anglaise » de la fenêtre de détails : état, lecture, téléchargement, actions
+function enBlock(j, admin) {
+  const e = j.english, can_ = canEnglish(j);
+  if (!e) return `<p class="hint">Pas encore de version anglaise.</p><div class="actions"><button class="btn small" data-act="english" data-id="${j.id}">${ic("sparkle")} Générer la version anglaise…</button></div>`;
+  const meta = [e.method && `traduit par : ${e.method}`, `moteur : ${e.engine}`, e.duration && `durée ${Math.round(e.duration / 60)} min`, e.size_mp3 && fmtSize(e.size_mp3)].filter(Boolean).join(" · ");
+  let body = "";
+  if (e.status === "pending") body = `<div class="queued">${ic("clock")} En attente du service de voix${state.enAlive === false ? " — il n'est pas démarré" : ""}</div>`;
+  else if (e.status === "running") body = `<div class="progress"><div style="width:${Math.round(e.progress * 100)}%"></div></div><div class="step"><b>${Math.round(e.progress * 100)} %</b> — ${esc(e.step)}</div>`;
+  else if (e.status === "review") body = `<div class="review-note"><span>✋ Le texte anglais attend votre relecture : la voix du prédicateur le dira tel quel.</span>${can_ ? `<button class="btn small" data-act="enreview" data-id="${j.id}">${ic("edit")} Relire le texte</button>` : ""}</div>`;
+  else if (e.status === "error") body = `<div class="err-box">${esc(e.error || "Erreur")}</div>`;
+  else body = `<div data-player="${j.id}" data-lang="en"></div>`;
+  return `${body}<p class="hint">${esc(meta)}</p>
+    <div class="actions">
+      ${e.has_mp3 ? `<a class="btn small" href="/api/jobs/${j.id}/english/file?download=true">⬇ Télécharger MP3 anglais</a>` : ""}
+      ${e.on_r2 ? `<button class="btn small ghost" data-act="enlink" data-id="${j.id}">${ic("link")} Copier le lien R2</button>` : ""}
+      ${can_ && e.status !== "running" ? `<button class="btn small ghost" data-act="english" data-id="${j.id}">${ic("retry")} ${e.status === "done" ? "Régénérer…" : "Relancer…"}</button>` : ""}
+      ${admin && e.status !== "running" ? `<button class="btn small ghost danger" data-act="endelete" data-id="${j.id}">${ic("trash")} Supprimer</button>` : ""}
+    </div>
+    ${admin && j.english_log ? `<details class="log"><summary>Journal de la version anglaise</summary><pre class="detail-log">${esc(j.english_log)}</pre></details>` : ""}`;
+}
+
 async function openDetail(id, silent = false) {
   const j = await api(`/api/jobs/${id}`).catch((err) => { if (!silent) toast(err.message, true); return null; });
   if (!j || (silent && !$("detailDialog").open)) return;  // rafraîchissement tardif : la fenêtre a été fermée entre-temps
   state.detail = j;
   const dlg = $("detailDialog");
   const logOpen = dlg.querySelector("details.log")?.open;
-  const keepAudio = dlg.querySelector("audio");
+  const keepAudio = { fr: dlg.querySelector('audio[data-lang="fr"]'), en: dlg.querySelector('audio[data-lang="en"]') };  // un son en cours n'est pas coupé
   $("detailTitle").textContent = j.title;
   const admin = state.me.is_admin;  // les autres comptes ne voient ni les étapes, ni le repérage, ni le journal
   const row = (k, v) => v ? `<dt>${k}</dt><dd>${v}</dd>` : "";
@@ -1599,6 +1798,8 @@ async function openDetail(id, silent = false) {
       ${can("folders.manage") && editable(j) ? `<button class="btn small ghost" data-act="rename" data-id="${j.id}">${ic("edit")} Renommer</button>` : ""}
       <span class="badge ${j.status}">${LABELS[j.status]}</span></div>
     ${liveBlock(j)}
+    ${j.status === "review" && can("jobs.create") && editable(j) ? `<div class="review-note"><span>✋ Des coupes de condensation attendent votre validation.</span>
+      <button class="btn small" data-act="review" data-id="${j.id}">${ic("scissors")} Relire les coupes</button></div>` : ""}
     ${j.error ? `<div class="err-box">${esc(j.error)}</div>` : ""}
     ${j.has_mp3 || link ? `<div class="d-title">Écouter et télécharger</div>
       ${j.has_mp3 ? `<div data-player="${j.id}" data-auto></div>` : ""}
@@ -1606,6 +1807,7 @@ async function openDetail(id, silent = false) {
     ${link ? `<div class="d-title">Lien direct de partage (R2)</div>${link}
       <p class="hint">${j.links_public ? "Lien public permanent."
         : `Lien signé valable ${j.links_days} jours, regénéré à chaque ouverture de cette fenêtre. Pour des liens permanents, configurez R2_PUBLIC_BASE_URL.`}</p>` : ""}
+    ${j.english || canEnglish(j) ? `<div class="d-title">Version anglaise</div>${enBlock(j, admin)}` : ""}
     <div class="d-title">Informations</div>
     <dl class="kv">
       ${row("Fichier", esc(j.display_filename))}
@@ -1620,6 +1822,7 @@ async function openDetail(id, silent = false) {
       ${row("Durée de la vidéo", j.duration_source)}` : ""}
       ${row("Durée du podcast", j.duration_output)}
       ${row("Taille", j.size_mp3 ? fmtSize(j.size_mp3) : "")}
+      ${row("Condensation", j.condense_pct ? `−${j.condense_pct} % visés, ${j.condense_mode === "review" ? "coupes validées par l'utilisateur" : "coupes appliquées automatiquement"}` : "")}
       ${row("Tokens IA", j.tokens_in || j.tokens_out ? `${fmtTok(j.tokens_in + j.tokens_out)} (${fmtTok(j.tokens_in)} envoyés · ${fmtTok(j.tokens_out)} reçus)` : "")}
       ${row("Créé par", esc(j.created_by || ""))}
       ${row("Créé le", fmtDate(j.created_at))}
@@ -1634,8 +1837,10 @@ async function openDetail(id, silent = false) {
       ${(j.status === "done" || j.status === "error") && can("jobs.create") && editable(j) ? `<button class="btn ghost" data-act="retry" data-id="${j.id}">Relancer</button>` : ""}
       ${j.status !== "running" && can("jobs.delete") && editable(j) ? `<button class="btn ghost danger" data-act="delete" data-id="${j.id}">Supprimer</button>` : ""}
     </div>`;
-  const slot = $("detailBody").querySelector("[data-player]");
-  if (slot) slot.replaceWith(keepAudio && keepAudio.dataset.job == j.id ? keepAudio : makePlayer(j.id, false));
+  $("detailBody").querySelectorAll("[data-player]").forEach((slot) => {
+    const lang = slot.dataset.lang || "fr", kept = keepAudio[lang];
+    slot.replaceWith(kept && kept.dataset.job == j.id ? kept : makePlayer(j.id, false, lang));
+  });
   if (!dlg.open) dlg.showModal();
 }
 $("detailBody").addEventListener("click", (e) => {
@@ -1865,6 +2070,117 @@ $("permsPanel").addEventListener("change", (e) => {
   if (permsState.sel.has(f.id)) permsState.sel.delete(f.id);
   else { permsState.sel.add(f.id); T.descendants(f).forEach((x) => permsState.sel.delete(x.id)); permsState.open.add(f.id); }  // le contenu est inclus : plus besoin de le lister
   renderFolderTree();
+});
+
+// ---------- Voix anglaise : réglages et banc d'essai (administrateur) ----------
+const voice = { data: null, sig: "", cards: new Map() };
+const verdict = (m) => (m <= 60 ? ["ok", "confortable : presque en temps réel"] : m <= 180 ? ["warn", "acceptable en tâche de fond"] : ["err", "trop lent sur ce serveur"]);
+async function loadVoice(silent = false) {
+  clearTimeout(state.timers.voice);
+  try { [voice.data, voice.en] = await Promise.all([api("/api/voicelab"), api("/api/english")]); } catch (err) { if (!silent) toast(err.message, true); return; }
+  if (state.view !== "voice") return;
+  const d = voice.data, en = voice.en;
+  state.enAlive = d.alive;
+  $("voiceStatus").innerHTML = d.alive
+    ? '<span class="pill on">Service voicelab actif</span> <span class="hint">Les essais sont calculés sur ce serveur, l\'un après l\'autre.</span>'
+    : `<span class="pill off">Service voicelab arrêté</span>
+       <p class="hint">Les modèles de voix (PyTorch, plusieurs Go) tournent dans un service à part, <b>non démarré par défaut</b>. Pour l'activer, ajoutez la variable <code>COMPOSE_PROFILES=voicelab</code> (Coolify : Environment Variables) puis redéployez ; en local : <code>docker compose --profile voicelab up -d --build</code>. Le premier essai télécharge les modèles. Les essais lancés ci-dessous attendent que le service démarre.</p>`;
+  const sig = d.podcasts.map((p) => p.id).join(",") + "|" + d.engines.map((e) => e.id).join(",") + "|" + JSON.stringify(en.defaults) + en.claude_available;
+  if (sig !== voice.sig) {
+    const tr = (sel) => Object.entries(en.translators).map(([k, l]) => `<option value="${k}" ${k === sel ? "selected" : ""}>${esc(l)}${k === "claude" && !en.claude_available ? " — indisponible, le modèle local sera utilisé" : ""}</option>`).join("");
+    $("enTranslator").innerHTML = tr(en.defaults.translator);
+    $("voiceTranslator").innerHTML = tr("local");
+    $("enEngine").innerHTML = Object.entries(en.engines).map(([k, l]) => `<option value="${k}" ${k === en.defaults.engine ? "selected" : ""}>${esc(l)}</option>`).join("");  // le formulaire n'est reconstruit que si ses choix changent : pas de saisie perdue pendant le suivi
+    voice.sig = sig;
+    $("voicePodcast").innerHTML = d.podcasts.length
+      ? d.podcasts.map((p) => `<option value="${p.id}" data-s="${p.seconds}">${esc(p.title)} · ${esc(p.date)}${p.folder ? ` — ${esc(p.folder)}` : ""} (${Math.round(p.seconds / 60)} min)</option>`).join("")
+      : '<option value="">Aucun podcast terminé</option>';
+    $("voiceEngines").innerHTML = d.engines.map((e, i) => `<label><input type="checkbox" name="engine" value="${e.id}" ${i === 0 ? "checked" : ""}> <b>${esc(e.label)}</b> <span class="muted">— ${esc(e.note)}</span></label>`).join("");
+    $("voicePodcast").onchange();
+  }
+  renderVoiceRuns();
+  if (d.runs.some((r) => r.status === "pending" || r.status === "running")) state.timers.voice = setTimeout(() => loadVoice(true), 3000);
+}
+$("enSettings").onsubmit = async (e) => {
+  e.preventDefault();
+  const f = e.currentTarget;
+  await busy(f.querySelector("button[type=submit]"), async () => {
+    try { await api("/api/english/settings", { method: "PUT", body: { translator: f.translator.value, engine: f.engine.value } }); toast("Réglages enregistrés", "ok"); }
+    catch (err) { toast(err.message, true); }
+  });
+};
+document.querySelector('[data-vtab]')?.parentElement.addEventListener("click", (e) => {  // onglets Réglages / Banc d'essai
+  const t = e.target.closest("[data-vtab]");
+  if (!t) return;
+  document.querySelectorAll("[data-vtab]").forEach((b) => { const on = b === t; b.classList.toggle("active", on); b.setAttribute("aria-selected", on); });
+  document.querySelectorAll("[data-vpane]").forEach((p) => (p.hidden = p.dataset.vpane !== t.dataset.vtab));
+});
+$("voicePodcast").onchange = () => {  // début proposé : 15 min, ou plus tôt si le podcast est court
+  const s = +($("voicePodcast").selectedOptions[0]?.dataset.s || 0);
+  $("voiceForm").start.value = Math.max(0, Math.min(15, Math.floor(s / 60) - 4));
+};
+$("voiceForm").onsubmit = async (e) => {
+  e.preventDefault();
+  const f = e.currentTarget, engines = [...f.querySelectorAll("[name=engine]:checked")].map((c) => c.value);
+  await busy(f.querySelector("button[type=submit]"), async () => {
+    try {
+      if (!f.job_id.value) throw new Error("Aucun podcast terminé à utiliser");
+      await api("/api/voicelab/runs", { method: "POST", body: { job_id: +f.job_id.value, start: +f.start.value * 60, seconds: +f.seconds.value,
+        ref_start: +f.ref_start.value, engines, translator: f.translator.value, text_en: f.text_en.value } });
+      toast("Essai ajouté", "ok");
+      await loadVoice(true);
+    } catch (err) { toast(err.message, true); }
+  });
+};
+function voiceCard(r) {
+  const base = `/api/voicelab/runs/${r.id}/file/`, rep = r.report;
+  const meta = [fmtDate(r.created_at), `extrait de ${Math.round(r.seconds / 60 * 10) / 10} min à partir de ${Math.floor(r.start / 60)} min`, r.engines.join(", "), r.has_text_en ? "traduction fournie" : (r.report?.translation ? `traduit par : ${r.report.translation}` : r.translator === "claude" ? "traduction Claude" : "traduction locale")].filter(Boolean).join(" · ");
+  let body = "";
+  if (r.status === "pending") body = `<div class="queued">${ic("clock")} En attente${voice.data.alive ? "" : " — le service voicelab n'est pas démarré"}</div>`;
+  else if (r.status === "running") body = `<div class="progress"><div style="width:${Math.round(r.progress * 100)}%"></div></div><div class="step"><b>${Math.round(r.progress * 100)} %</b> — ${esc(r.step)}</div>`;
+  else if (r.status === "error") body = `<div class="err-box">${esc(r.error || "Erreur")}</div>`;
+  else if (rep) {
+    const rows = rep.results.map((m) => {
+      if (m.error) return `<tr><td>${esc(m.engine)}</td><td colspan="6" class="vfail">Échec : ${esc(m.error)}${m.hint ? `<br><small>${esc(m.hint)}</small>` : ""}</td></tr>`;
+      const [kind, why] = verdict(m.min_per_source_hour);
+      return `<tr><td><b>${esc(m.engine)}</b></td><td>${m.load_s} s</td><td>${m.synth_s} s</td><td>${m.audio_s} s</td><td>${m.rtf}</td>
+        <td><span class="vv ${kind}" title="${esc(why)}">${m.min_per_source_hour} min</span></td><td><audio controls preload="none" src="${base}${m.file}"></audio></td></tr>`;
+    }).join("");
+    body = `<div class="vref">Voix de référence : <audio controls preload="none" src="${base}ref.wav"></audio>
+        <a href="${base}en.txt" target="_blank" rel="noopener">texte anglais</a>${r.has_text_en ? "" : ` · <a href="${base}fr.txt" target="_blank" rel="noopener">texte français</a>`}</div>
+      <table class="usage-table"><thead><tr><th>Moteur</th><th>Chargement</th><th>Synthèse</th><th>Audio</th><th>RTF</th><th>Pour 1 h de sermon</th><th>Écoute</th></tr></thead><tbody>${rows}</tbody></table>
+      <p class="hint">RTF inférieur à 1 : la synthèse est plus rapide que l'audio produit. « Pour 1 h de sermon » : minutes de calcul estimées, chargement exclu (vert : moins d'1 h, orange : jusqu'à 3 h, rouge : au-delà). Écoutez pour juger la ressemblance, le naturel et l'accent.</p>`;
+  }
+  return `<div class="card vrun" data-run="${r.id}">
+    <div class="vhead"><div><b>${esc(r.title)}</b> <span class="badge ${r.status}">${{ pending: "En attente", running: "En cours", done: "Terminé", error: "Erreur" }[r.status]}</span>
+      <div class="job-sub">${esc(meta)}</div></div>
+      <button class="btn small ghost danger" data-vdel="${r.id}" ${r.status === "running" ? "disabled" : ""}>${ic("trash")} Supprimer</button></div>
+    ${body}<details class="log"><summary>Journal</summary><pre class="detail-log">${esc(r.log || "(vide)")}</pre></details></div>`;
+}
+function renderVoiceRuns() {  // chaque carte n'est refaite que si son contenu change : un lecteur audio en cours n'est jamais coupé
+  const box = $("voiceRuns"), runs = voice.data.runs;
+  if (!runs.length) { box.innerHTML = '<p class="muted">Aucun essai pour le moment.</p>'; voice.cards.clear(); return; }
+  if (box.querySelector(":scope > p")) box.innerHTML = "";
+  const alive = voice.data.alive, keep = new Set(runs.map((r) => r.id));
+  voice.cards.forEach((_, id) => { if (!keep.has(id)) { box.querySelector(`[data-run="${id}"]`)?.remove(); voice.cards.delete(id); } });
+  let prev = null;
+  for (const r of runs) {
+    const sig = [r.status, r.step, r.progress, (r.log || "").length, alive].join("|");
+    let node = box.querySelector(`[data-run="${r.id}"]`);
+    if (!node || voice.cards.get(r.id) !== sig) {
+      const fresh = document.createRange().createContextualFragment(voiceCard(r)).firstElementChild;
+      hydrateIcons(fresh);
+      node ? node.replaceWith(fresh) : box.insertBefore(fresh, prev ? prev.nextSibling : box.firstChild);
+      node = fresh;
+      voice.cards.set(r.id, sig);
+    }
+    prev = node;
+  }
+}
+$("voiceRuns").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-vdel]");
+  if (!b || !(await confirmBox({ title: "Supprimer cet essai ?", message: "Ses fichiers audio seront supprimés.", confirmLabel: "Supprimer", danger: true }))) return;
+  try { await api(`/api/voicelab/runs/${b.dataset.vdel}`, { method: "DELETE" }); await loadVoice(true); } catch (err) { toast(err.message, true); }
 });
 
 // ---------- Corbeille ----------

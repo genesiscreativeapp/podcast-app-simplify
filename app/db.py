@@ -85,6 +85,55 @@ class AiUsage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class EnVersion(Base):
+    """Version anglaise d'un podcast, avec la voix du prédicateur : traduite puis synthétisée par le service voicelab."""
+    __tablename__ = "en_versions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    job_id: Mapped[int] = mapped_column(Integer, unique=True)
+    created_by: Mapped[str] = mapped_column(String(60))
+    mode: Mapped[str] = mapped_column(String(10), default="review")  # auto : publiée telle quelle ; review : le texte anglais est validé avant la voix
+    translator: Mapped[str] = mapped_column(String(10), default="local")  # local (modèle libre) | claude
+    engine: Mapped[str] = mapped_column(String(40), default="chatterbox-nano")  # moteur de voix
+    ref_start: Mapped[float | None] = mapped_column(Float, nullable=True)  # début de la voix de référence dans le podcast ; None = choisi automatiquement
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending|running|review|done|error
+    step: Mapped[str] = mapped_column(String(200), default="En attente")
+    progress: Mapped[float] = mapped_column(Float, default=0.0)
+    log: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    text_json: Mapped[str | None] = mapped_column(Text, nullable=True)  # [{"id", "fr", "en"}] : le texte, modifiable à la relecture
+    method: Mapped[str | None] = mapped_column(String(40), nullable=True)  # comment le texte a été traduit
+    review_ok: Mapped[bool] = mapped_column(Boolean, default=False)  # texte validé : la synthèse peut commencer
+    local_mp3: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    size_mp3: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_output: Mapped[float | None] = mapped_column(Float, nullable=True)
+    r2_key_mp3: Mapped[str | None] = mapped_column(String(800), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class VoiceBench(Base):
+    """Essai de voix en anglais lancé depuis « Banc d'essai voix » ; calculé par le service optionnel voicelab (app/voicelab.py)."""
+    __tablename__ = "voice_bench"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    created_by: Mapped[str] = mapped_column(String(60))
+    job_id: Mapped[int] = mapped_column(Integer)  # le podcast dont on prend un extrait
+    title: Mapped[str] = mapped_column(String(300))
+    start: Mapped[float] = mapped_column(Float)  # début de l'extrait dans le podcast (secondes)
+    seconds: Mapped[float] = mapped_column(Float)  # durée de l'extrait
+    ref_start: Mapped[float] = mapped_column(Float, default=5.0)  # début de la voix de référence dans l'extrait
+    engines: Mapped[str] = mapped_column(String(200))  # séparés par des virgules
+    text_en: Mapped[str | None] = mapped_column(Text, nullable=True)  # traduction fournie : sinon Whisper puis la traduction
+    translator: Mapped[str] = mapped_column(String(10), default="local")  # local (modèle libre) | claude
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending|running|done|error
+    step: Mapped[str] = mapped_column(String(200), default="En attente")
+    progress: Mapped[float] = mapped_column(Float, default=0.0)
+    log: Mapped[str] = mapped_column(Text, default="")
+    report_json: Mapped[str | None] = mapped_column(Text, nullable=True)  # mesures par moteur
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class Intro(Base):
     """Bibliothèque d'intros (MP3). Une seule peut être l'intro par défaut."""
     __tablename__ = "intros"
@@ -134,7 +183,7 @@ class Job(Base):
     start_override: Mapped[float | None] = mapped_column(Float, nullable=True)
     end_override: Mapped[float | None] = mapped_column(Float, nullable=True)
 
-    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending|running|done|error
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending|running|review (coupes à valider)|done|error
     step: Mapped[str] = mapped_column(String(200), default="En attente")
     progress: Mapped[float] = mapped_column(Float, default=0.0)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -149,6 +198,14 @@ class Job(Base):
 
     # IA d'un administrateur pour ce traitement : nom d'utilisateur dont on prend la configuration, AI_SERVER, ou NULL = celle de l'auteur
     ai_user: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    # Condensation : part à retirer (0 = aucune, 10 / 20 / 30 %) ; « auto » l'applique, « review » attend la validation humaine
+    condense_pct: Mapped[int] = mapped_column(Integer, default=0)
+    condense_mode: Mapped[str] = mapped_column(String(10), default="auto")
+    review_json: Mapped[str | None] = mapped_column(Text, nullable=True)  # phrases, coupes proposées puis choisies
+    review_ok: Mapped[bool] = mapped_column(Boolean, default=False)  # coupes validées : le traitement reprend où il s'était arrêté
+    # Version anglaise : demandée à la création (« auto » : publiée telle quelle ; « review » : l'utilisateur valide d'abord le texte)
+    english_mode: Mapped[str] = mapped_column(String(10), default="")
+    transcript_json: Mapped[str | None] = mapped_column(Text, nullable=True)  # texte final du podcast, phrase par phrase (JSON)
     tokens_in: Mapped[int] = mapped_column(Integer, default=0)   # tokens envoyés à l'IA pendant ce traitement
     tokens_out: Mapped[int] = mapped_column(Integer, default=0)  # tokens reçus de l'IA
 
@@ -184,7 +241,9 @@ def _init_db() -> None:
                                      ("users", "is_system", "BOOLEAN DEFAULT 0"), ("users", "max_parallel", "INTEGER DEFAULT 5"),
                                      ("jobs", "deleted_at", "DATETIME"), ("jobs", "deleted_by", "VARCHAR(60)"),
                                      ("folders", "deleted_at", "DATETIME"), ("folders", "deleted_by", "VARCHAR(60)"),
-                                     ("jobs", "ai_user", "VARCHAR(60)"), ("jobs", "tokens_in", "INTEGER DEFAULT 0"), ("jobs", "tokens_out", "INTEGER DEFAULT 0"),
+                                     ("jobs", "ai_user", "VARCHAR(60)"), ("voice_bench", "translator", "VARCHAR(10) DEFAULT 'local'"), ("jobs", "english_mode", "VARCHAR(10) DEFAULT ''"), ("jobs", "transcript_json", "TEXT"), ("jobs", "condense_pct", "INTEGER DEFAULT 0"),
+                                     ("jobs", "condense_mode", "VARCHAR(10) DEFAULT 'auto'"), ("jobs", "review_json", "TEXT"),
+                                     ("jobs", "review_ok", "BOOLEAN DEFAULT 0"), ("jobs", "tokens_in", "INTEGER DEFAULT 0"), ("jobs", "tokens_out", "INTEGER DEFAULT 0"),
                                      ("users", "llm_key", "TEXT"), ("users", "ai_on", "BOOLEAN DEFAULT 1"),
                                      ("folders", "created_by", "VARCHAR(60)")):
             cols = {r[1] for r in conn.execute(text(f"PRAGMA table_info({table})"))}

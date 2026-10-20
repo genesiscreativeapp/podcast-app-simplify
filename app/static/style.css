@@ -592,3 +592,44 @@ button.pill { border: 0; font: inherit; }
 button.tw:hover { background: var(--border); } .tw.open { transform: rotate(90deg); }
 .ftag { font-size: 11px; color: var(--muted); white-space: nowrap; } .ftag.direct { color: var(--accent); font-weight: 600; }
 .frow.partial label span { font-weight: 600; }
+
+/* Condensation : traitement « à valider » et relecture des coupes */
+.badge.review { background: var(--warn-soft); color: var(--warn); }
+.thumb .dot.review { background: var(--warn); }
+.ring.review { background: var(--warn-soft); color: var(--warn); }
+.ring.review b { font-size: 22px; }
+.active-card.review { border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); background: linear-gradient(135deg, color-mix(in srgb, var(--warn) 8%, var(--panel)), var(--panel)); }
+.review-note { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 10px 0; padding: 10px 14px; border-radius: 12px; background: var(--warn-soft); color: var(--warn); font-weight: 600; font-size: 13px; }
+.rv-bar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin: 12px 0 8px; font-size: 13px; }
+.rv-bar label { margin: 0; } .rv-bar b { color: var(--accent); font-variant-numeric: tabular-nums; }
+.rv-points { margin: 10px 0; font-size: 13px; } .rv-points summary { cursor: pointer; font-weight: 600; } .rv-points ul { margin: 6px 0 0; padding-left: 20px; color: var(--muted); }
+.rv-list { list-style: none; margin: 0; padding: 4px; max-height: 46vh; overflow: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); }
+.rv-list.only .rv-row:not(.proposed):not(.on) { display: none; }
+.rv-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 8px; font-size: 13px; }
+.rv-row:hover { background: var(--panel); }
+.rv-row.on { background: color-mix(in srgb, var(--err) 9%, var(--panel)); }
+.rv-row.on .rv-text { text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--err) 60%, transparent); }
+.rv-row label { flex-direction: row; display: flex; align-items: flex-start; gap: 8px; flex: 1; min-width: 0; margin: 0; font-weight: 400; cursor: pointer; }
+.rv-time { color: var(--muted); font-variant-numeric: tabular-nums; flex-shrink: 0; min-width: 38px; }
+.rv-why { color: var(--warn); font-weight: 600; max-width: 220px; text-align: right; }
+.rv-row .icon-btn { font-size: 13px; padding: 2px 8px; flex-shrink: 0; }
+
+/* Banc d'essai voix */
+.vrun { display: flex; flex-direction: column; gap: 10px; }
+.vhead { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.vhead > div { flex: 1 1 280px; min-width: 0; } .vhead > .btn { flex-shrink: 0; }
+.vref { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 13px; }
+.vrun audio { height: 34px; max-width: 100%; }
+.vfail { color: var(--err); font-size: 13px; } .vfail small { color: var(--muted); }
+.vv { font-weight: 700; padding: 2px 8px; border-radius: 99px; } .vv.ok { background: var(--ok-soft); color: var(--ok); } .vv.warn { background: var(--warn-soft); color: var(--warn); } .vv.err { background: var(--err-soft); color: var(--err); }
+.vrun .usage-table { display: block; overflow-x: auto; }
+#voiceStatus code { background: var(--bg); padding: 1px 6px; border-radius: 6px; font-size: 12px; }
+
+/* Version anglaise : relecture du texte, réglages */
+.en-list { display: flex; flex-direction: column; gap: 10px; max-height: 58vh; overflow: auto; padding: 4px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); }
+.en-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; align-items: start; padding: 8px; border-radius: 10px; background: var(--panel); }
+.en-fr { font-size: 13px; color: var(--muted); line-height: 1.5; }
+.en-row textarea { margin: 0; font-size: 13px; line-height: 1.5; }
+@media (max-width: 760px) { .en-row { grid-template-columns: 1fr; } }
+.plist-ol { margin: 6px 0 10px; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; font-size: 14px; line-height: 1.5; }
+.plist-ol code, #enSettings code { background: var(--bg); padding: 1px 6px; border-radius: 6px; font-size: 12px; }

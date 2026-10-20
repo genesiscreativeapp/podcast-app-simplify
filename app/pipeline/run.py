@@ -1,17 +1,19 @@
 """Orchestration complète d'un traitement, du lien YouTube au podcast sur R2."""
+import json
 import shutil
 import time
 import traceback
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
-from .. import config, r2sync, storage
+from .. import config, english, r2sync, storage
 from ..db import AI_SERVER, AiUsage, Folder, Job, SessionLocal, job_ai, resolve_intro
 from ..utils import fmt_time
-from . import audio, steps
+from . import audio, condense, steps
 from .detect import detect_sermon
 from .download import download
-from .edit import edit_file, sentence_end
+from .edit import edit_file, sentence_end, word_cuts
 from .offtopic import find_offtopic
 from .transcribe import transcribe_sampled, transcribe_words
 
@@ -73,6 +75,122 @@ class Reporter:
         return cb
 
 
+MIN_SENTENCES = 20  # en dessous, le texte est trop court pour juger de ce qui est redondant
+
+
+def _analyse(rep: Reporter, work: Path, jb, llm: dict | None):
+    """Du téléchargement au retrait des témoignages et annonces.
+    → (audio nettoyé, mots horodatés, coupes déjà décidées en secondes, bilan du retrait)."""
+    use_ai = llm is not None
+    # 1-2. Téléchargement de l'audio seul (réutilisé tel quel lors d'un « Relancer »)
+    cache = config.CACHE_DIR / str(rep.job_id)
+    cached = [p for p in cache.glob("source.*") if p.suffix not in (".part", ".ytdl")]
+    if (cache / "ok").exists() and cached:
+        src, video_title = cached[0], jb.known_title
+        cache.touch()  # le garde parmi les plus récents lors du nettoyage du cache
+        rep.log("Fichier envoyé par l'utilisateur" if jb.url.startswith(config.UPLOAD_SCHEME)
+                else "Audio YouTube déjà en cache, téléchargement évité")
+    elif jb.url.startswith(config.UPLOAD_SCHEME):
+        raise RuntimeError("Le fichier envoyé n'est plus conservé sur le serveur : renvoyez-le pour relancer le traitement.")
+    else:
+        rep.step("download")
+        shutil.rmtree(cache, ignore_errors=True)
+        cache.mkdir(parents=True)
+        src, video_title = download(jb.url, cache, rep.sub("download"))
+        (cache / "ok").touch()
+    duration = audio.probe_duration(src)
+    rep._update(video_title=video_title, duration_source=duration)
+    rep.log(f"Vidéo : {video_title} ({fmt_time(duration)})")
+
+    # 3a. Repérage de la prédication
+    if jb.start_ov is not None or jb.end_ov is not None:
+        start = jb.start_ov or 0.0
+        end = min(jb.end_ov or duration, duration)
+        note = "Bornes saisies manuellement"
+    else:
+        rep.step("detect")
+        rep.log(f"Modèle {config.WHISPER_MODEL_DETECT}, {config.WHISPER_WORKERS} transcription(s) en parallèle")
+        wav16 = work / "full16k.wav"
+        audio.to_whisper(src, wav16, duration, rep.sub("detect", 0.0, 0.1))
+        segs = transcribe_sampled(wav16, duration, rep.sub("detect", 0.1, 1.0))
+        wav16.unlink(missing_ok=True)
+        if not use_ai:
+            rep.log("IA désactivée ou non configurée : repérage par heuristique")
+        elif llm["owner"] != AI_SERVER:
+            rep.log(f"IA : clé Anthropic personnelle de « {llm['owner']} »" + (" (choisie par un administrateur)" if jb.ai_chosen else ""))
+        start, end, note = detect_sermon(segs, duration, video_title or jb.title, rep.log, llm, rep.tokens)
+    if end - start < 30:
+        raise RuntimeError(f"Prédication trop courte détectée ({start:.0f}s → {end:.0f}s)")
+    rep._update(sermon_start=start, sermon_end=end, detection_note=note)
+    rep.log(f"Prédication : {fmt_time(start)} → {fmt_time(end)} — {note}")
+
+    # Marge autour d'une prédication repérée automatiquement : l'IA retirera ensuite précisément
+    # l'adoration qui précède et les annonces qui suivent (sans IA, pas de marge)
+    offtopic_on = config.REMOVE_OFFTOPIC and use_ai
+    auto = jb.start_ov is None and jb.end_ov is None
+    pad_b = min(config.OFFTOPIC_PAD_BEFORE, start) if offtopic_on and auto else 0.0
+    # sans IA : petite marge seulement, pour pouvoir finir sur une fin de phrase plutôt qu'en plein mot
+    pad_a = min(config.OFFTOPIC_PAD_AFTER if offtopic_on else config.END_MARGIN, duration - end) if auto else 0.0
+    win_start, win_end = start - pad_b, end + pad_a
+
+    # 3b. Extraction + amélioration de la voix (un seul passage ffmpeg)
+    rep.step("voice")
+    clean = work / "clean.wav"
+    clean16 = work / "clean16k.wav"
+    audio.extract_enhanced(src, win_start, win_end, clean, clean16, rep.sub("voice"))
+
+    # 3c. Transcription fine mot à mot (sur la prédication uniquement, lots en parallèle)
+    rep.step("words")
+    rep.log(f"Modèle {config.WHISPER_MODEL_EDIT}, {config.WHISPER_WORKERS} transcription(s) en parallèle")
+    segs = transcribe_words(clean16, win_end - win_start, rep.sub("words"))
+    clean16.unlink(missing_ok=True)
+    words = [w for s in segs for w in s["words"]]
+    total = win_end - win_start
+    tail_cut = []  # fin repérée recalée sur une fin de phrase ; ce qui suit est retiré
+    if pad_a:
+        cut_at = sentence_end(words, total - pad_a, pad_a)
+        tail_cut = [(cut_at, total)]
+
+    # 3c'. Retrait des témoignages, annonces, chants... (IA)
+    extra_cuts, offtopic_note = [], ""
+    if offtopic_on:
+        rep.step("clean")
+        extra_cuts, offtopic_note, ok = find_offtopic(segs, rep.log, llm, rep.tokens)
+        if not ok and (pad_b or pad_a):
+            # l'IA n'a pas répondu : on revient exactement aux bornes repérées, sans la marge
+            extra_cuts = [(0.0, pad_b), *(tail_cut or [(total - pad_a, total)])]
+            offtopic_note = "IA indisponible : marge retirée, adoration et annonces éventuelles conservées"
+            rep.log(offtopic_note)
+        elif offtopic_note:
+            rep.log(offtopic_note)
+    else:
+        extra_cuts = tail_cut
+        rep.log("Pas d'IA : témoignages et annonces non retirés")
+    return clean, words, extra_cuts, offtopic_note
+
+
+def _final_text(words: list[dict], cuts: list[tuple[float, float]]) -> list[str]:
+    """Texte final du podcast, phrase par phrase : les mots qui ne sont pas dans une coupe (témoignages, condensation, « euh », redites).
+    Il sert de base à la version anglaise : on ne traduit que ce qui est réellement dit dans le podcast."""
+    kept = [w for w in words if not any(a <= (w["start"] + w["end"]) / 2 <= b for a, b in cuts)]
+    return [s["text"] for s in condense.build_sentences(kept)]
+
+
+def _condense(rep: Reporter, jb, words, extra_cuts, llm: dict | None) -> dict | None:
+    """Propose les phrases à retirer (avec ou sans IA). → la relecture {phrases, coupes proposées…}, ou None si le texte est trop court."""
+    rep.step("condense")
+    sents = condense.build_sentences(words, extra_cuts)
+    if len(sents) < MIN_SENTENCES:
+        rep.log("Condensation : texte trop court pour juger de ce qui est redondant, rien n'est retiré")
+        return None
+    prop = condense.propose(sents, jb.pct, llm, rep.log, rep.tokens)
+    rep.log(f"Condensation visée : −{jb.pct} % ({fmt_time(prop['target_s'])}) ; proposé : {len(prop['removed'])} phrase(s), "
+            f"{fmt_time(prop['saved_s'])} soit −{100 * prop['saved_s'] / max(prop['total_s'], 1):.0f} % — {prop['method']}")
+    return {"pct": jb.pct, "method": prop["method"], "target_s": prop["target_s"], "total_s": prop["total_s"], "saved_s": prop["saved_s"],
+            "key_points": prop["key_points"], "sentences": sents,
+            "removed": [{"id": i, **r} for i, r in prop["removed"].items()], "chosen": list(prop["removed"])}
+
+
 def run_job(job_id: int) -> None:
     with SessionLocal() as s:
         job = s.get(Job, job_id)
@@ -80,119 +198,69 @@ def run_job(job_id: int) -> None:
         intro = resolve_intro(s, folder, job.intro_id)
         # Décidé au démarrage : le traitement va au bout avec cette IA. Couper l'IA ensuite ne vaut que pour les traitements suivants.
         llm = job_ai(s, job)
-        url, title, date, filename = job.youtube_url, job.title, job.date, job.filename
-        known_title = job.video_title
-        ai_chosen = job.ai_user  # choisi par un administrateur
-        start_ov, end_ov = job.start_override, job.end_override
+        jb = SimpleNamespace(url=job.youtube_url, title=job.title, known_title=job.video_title, ai_chosen=job.ai_user,
+                             start_ov=job.start_override, end_ov=job.end_override, pct=job.condense_pct or 0,
+                             mode=job.condense_mode or "auto", review_ok=bool(job.review_ok), review_json=job.review_json,
+                             english_mode=job.english_mode or "")
+        date = job.date
 
-    use_ai = llm is not None
     rep = Reporter(job_id, llm and llm["owner"])
     work = config.WORK_DIR / str(job_id)
-    shutil.rmtree(work, ignore_errors=True)
-    work.mkdir(parents=True)
+    # Coupes validées par l'utilisateur et données d'analyse conservées : on reprend après la condensation, sans rien refaire
+    resume = bool(jb.review_ok and jb.review_json and (work / "analysis.json").exists() and (work / "clean.wav").exists())
+    if not resume:
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True)
+        # consommation de CE passage (un « Relancer » repart de zéro ; le journal garde l'historique)
+        rep._update(tokens_in=0, tokens_out=0, review_json=None, review_ok=False)
     t0 = time.monotonic()
-    rep._update(tokens_in=0, tokens_out=0)  # consommation de CE passage (un « Relancer » repart de zéro ; le journal garde l'historique)
+    paused = False
 
     try:
-        # 1-2. Téléchargement de l'audio seul (réutilisé tel quel lors d'un « Relancer »)
-        cache = config.CACHE_DIR / str(job_id)
-        cached = [p for p in cache.glob("source.*") if p.suffix not in (".part", ".ytdl")]
-        if (cache / "ok").exists() and cached:
-            src, video_title = cached[0], known_title
-            cache.touch()  # le garde parmi les plus récents lors du nettoyage du cache
-            rep.log("Fichier envoyé par l'utilisateur" if url.startswith(config.UPLOAD_SCHEME)
-                    else "Audio YouTube déjà en cache, téléchargement évité")
-        elif url.startswith(config.UPLOAD_SCHEME):
-            raise RuntimeError("Le fichier envoyé n'est plus conservé sur le serveur : renvoyez-le pour relancer le traitement.")
+        if resume:
+            saved = json.loads((work / "analysis.json").read_text())
+            words, offtopic_note = saved["words"], saved["offtopic_note"]
+            extra_cuts = [tuple(c) for c in saved["extra_cuts"]]
+            clean, review = work / "clean.wav", json.loads(jb.review_json)
+            rep.log("Reprise après validation des coupes")
         else:
-            rep.step("download")
-            shutil.rmtree(cache, ignore_errors=True)
-            cache.mkdir(parents=True)
-            src, video_title = download(url, cache, rep.sub("download"))
-            (cache / "ok").touch()
-        duration = audio.probe_duration(src)
-        rep._update(video_title=video_title, duration_source=duration)
-        rep.log(f"Vidéo : {video_title} ({fmt_time(duration)})")
+            clean, words, extra_cuts, offtopic_note = _analyse(rep, work, jb, llm)
+            review = _condense(rep, jb, words, extra_cuts, llm) if jb.pct else None
+            if review and jb.mode == "review" and review["removed"]:
+                # validation humaine : on garde l'audio nettoyé et l'analyse, le traitement s'arrête ici sans occuper de place
+                (work / "analysis.json").write_text(json.dumps({"words": words, "extra_cuts": extra_cuts, "offtopic_note": offtopic_note}))
+                rep._update(status="review", step="À valider : coupes proposées", progress=steps.BY_KEY["condense"][2],
+                            review_json=json.dumps(review), review_ok=False)
+                rep.log("En attente de la validation des coupes proposées")
+                paused = True
+                return
 
-        # 3a. Repérage de la prédication
-        if start_ov is not None or end_ov is not None:
-            start = start_ov or 0.0
-            end = min(end_ov or duration, duration)
-            note = "Bornes saisies manuellement"
-        else:
-            rep.step("detect")
-            rep.log(f"Modèle {config.WHISPER_MODEL_DETECT}, {config.WHISPER_WORKERS} transcription(s) en parallèle")
-            wav16 = work / "full16k.wav"
-            audio.to_whisper(src, wav16, duration, rep.sub("detect", 0.0, 0.1))
-            segs = transcribe_sampled(wav16, duration, rep.sub("detect", 0.1, 1.0))
-            wav16.unlink(missing_ok=True)
-            if not use_ai:
-                rep.log("IA désactivée ou non configurée : repérage par heuristique")
-            elif llm["owner"] != AI_SERVER:
-                rep.log(f"IA : clé Anthropic personnelle de « {llm['owner']} »" + (" (choisie par un administrateur)" if ai_chosen else ""))
-            start, end, note = detect_sermon(segs, duration, video_title or title, rep.log, llm, rep.tokens)
-        if end - start < 30:
-            raise RuntimeError(f"Prédication trop courte détectée ({start:.0f}s → {end:.0f}s)")
-        rep._update(sermon_start=start, sermon_end=end, detection_note=note)
-        rep.log(f"Prédication : {fmt_time(start)} → {fmt_time(end)} — {note}")
-
-        # Marge autour d'une prédication repérée automatiquement : l'IA retirera ensuite précisément
-        # l'adoration qui précède et les annonces qui suivent (sans IA, pas de marge)
-        offtopic_on = config.REMOVE_OFFTOPIC and use_ai
-        auto = start_ov is None and end_ov is None
-        pad_b = min(config.OFFTOPIC_PAD_BEFORE, start) if offtopic_on and auto else 0.0
-        # sans IA : petite marge seulement, pour pouvoir finir sur une fin de phrase plutôt qu'en plein mot
-        pad_a = min(config.OFFTOPIC_PAD_AFTER if offtopic_on else config.END_MARGIN, duration - end) if auto else 0.0
-        win_start, win_end = start - pad_b, end + pad_a
-
-        # 3b. Extraction + amélioration de la voix (un seul passage ffmpeg)
-        rep.step("voice")
-        clean = work / "clean.wav"
-        clean16 = work / "clean16k.wav"
-        audio.extract_enhanced(src, win_start, win_end, clean, clean16, rep.sub("voice"))
-
-        # 3c. Transcription fine mot à mot (sur la prédication uniquement, lots en parallèle)
-        rep.step("words")
-        rep.log(f"Modèle {config.WHISPER_MODEL_EDIT}, {config.WHISPER_WORKERS} transcription(s) en parallèle")
-        segs = transcribe_words(clean16, win_end - win_start, rep.sub("words"))
-        clean16.unlink(missing_ok=True)
-        words = [w for s in segs for w in s["words"]]
-        total = win_end - win_start
-        tail_cut = []  # fin repérée recalée sur une fin de phrase ; ce qui suit est retiré
-        if pad_a:
-            cut_at = sentence_end(words, total - pad_a, pad_a)
-            tail_cut = [(cut_at, total)]
-
-        # 3c'. Retrait des témoignages, annonces, chants... (IA)
-        extra_cuts, offtopic_note = [], ""
-        if offtopic_on:
-            rep.step("clean")
-            extra_cuts, offtopic_note, ok = find_offtopic(segs, rep.log, llm, rep.tokens)
-            if not ok and (pad_b or pad_a):
-                # l'IA n'a pas répondu : on revient exactement aux bornes repérées, sans la marge
-                extra_cuts = [(0.0, pad_b), *(tail_cut or [(total - pad_a, total)])]
-                offtopic_note = "IA indisponible : marge retirée, adoration et annonces éventuelles conservées"
-                rep.log(offtopic_note)
-            elif offtopic_note:
-                rep.log(offtopic_note)
-        else:
-            extra_cuts = tail_cut
-            rep.log("Pas d'IA : témoignages et annonces non retirés")
+        cond_cuts, cond_note = [], ""
+        if review:  # coupes de condensation : toutes celles proposées (automatique) ou celles que l'utilisateur a gardées
+            cond_cuts = condense.cuts_for(review["sentences"], review["chosen"])
+            cond_note = (f"condensation : {len(cond_cuts)} phrase(s) retirée(s), {fmt_time(sum(b - a for a, b in cond_cuts))} "
+                         f"({review['method']}" + (", validée" if resume else "") + ")")
+            rep._update(review_json=json.dumps(review))
 
         # 3d. Montage : silences, « euh », répétitions
         rep.step("edit")
         edited = work / "edited.wav"
         stats = edit_file(clean, edited, words, config.MAX_PAUSE, config.TARGET_PAUSE,
-                          config.REMOVE_FILLERS, config.REMOVE_REPEATS, extra_cuts,
+                          config.REMOVE_FILLERS, config.REMOVE_REPEATS, extra_cuts + cond_cuts,
                           config.REPEAT_MAX_GAP, config.REPEAT_MAX_WORDS)
         examples = " ; ".join(f"« {e} »" for e in stats["examples"][:5])
         note = [f"{stats['pauses']} silences raccourcis", f"{stats['fillers']} hésitations retirées",
                 f"{stats['repeats']} répétitions retirées" + (f" (ex. : {examples})" if examples else "")]
         if offtopic_note:
             note.append(offtopic_note)
+        if cond_note:
+            note.append(cond_note)
         note.append(f"durée {fmt_time(stats['before'])} → {fmt_time(stats['after'])}")
         rep.log("Montage : " + " · ".join(note))
         rep._update(edit_note="\n".join(note))
+
+        w_cuts, _ = word_cuts(words, config.REMOVE_FILLERS, config.REMOVE_REPEATS, config.REPEAT_MAX_GAP, config.REPEAT_MAX_WORDS)
+        rep._update(transcript_json=json.dumps(_final_text(words, w_cuts + extra_cuts + cond_cuts), ensure_ascii=False))
 
         # 4. Intro + normalisation du volume
         rep.step("master")
@@ -234,14 +302,21 @@ def run_job(job_id: int) -> None:
 
         elapsed = time.monotonic() - t0
         rep.log(f"Terminé en {fmt_time(elapsed)} — {mp3.stat().st_size / 1e6:.1f} Mo (MP3)")
-        rep._update(status="done", step="Terminé", progress=1.0, error=None,
+        rep._update(status="done", step="Terminé", progress=1.0, error=None, review_ok=False,
                     finished_at=datetime.utcnow())
+        if jb.english_mode:  # version anglaise demandée avec le traitement : elle part en file, le service de voix la calculera
+            try:
+                with SessionLocal() as s2:
+                    english.queue(s2, s2.get(Job, job_id), jb.english_mode, s2.get(Job, job_id).created_by)
+                rep.log("Version anglaise mise en file d'attente")
+            except Exception:  # le podcast français est terminé : un échec ici ne doit pas le marquer en erreur
+                rep.log("Version anglaise non mise en file : " + traceback.format_exc().splitlines()[-1])
     except Exception as exc:
         rep.log("ERREUR\n" + traceback.format_exc())
-        rep._update(status="error", step="Erreur", error=str(exc)[:2000],
+        rep._update(status="error", step="Erreur", error=str(exc)[:2000], review_ok=False,
                     finished_at=datetime.utcnow())
     finally:
-        if not config.KEEP_WORK_FILES:
+        if not config.KEEP_WORK_FILES and not paused:
             shutil.rmtree(work, ignore_errors=True)
         _prune_cache()
 
