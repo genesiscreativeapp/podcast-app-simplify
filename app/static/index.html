@@ -38,11 +38,13 @@
       <div class="status" id="statusBar"></div>
       <label class="parallel" id="parallelBox" title="Nombre de traitements menés en même temps ; les autres attendent en file" hidden>Parallèle
         <select id="parallelSelect"></select></label>
+      <button class="icon-btn tour-btn" id="tourBtn" type="button" title="Revoir le tutoriel" aria-label="Revoir le tutoriel"><span data-ic="help"></span><span class="tour-label">Tutoriel</span></button>
       <button class="icon-btn theme-btn" data-theme-toggle type="button" aria-label="Changer de thème"></button>
       <div class="user-menu">
         <button class="user-btn" id="userBtn"><span class="avatar" id="userAvatar"></span><span id="userName"></span></button>
         <div class="menu" id="userMenu" hidden>
-          <button data-user="password"><span data-ic="key"></span> Changer mon mot de passe</button>
+          <button data-user="ai" id="menuAi" hidden><span data-ic="sparkle"></span> Mon IA (clé Anthropic)</button>
+          <button data-user="profile"><span data-ic="edit"></span> Mon profil (nom, mot de passe)</button>
           <button data-user="logout"><span data-ic="logout"></span> Se déconnecter</button>
         </div>
       </div>
@@ -55,7 +57,9 @@
           <button class="nav-link" data-nav="folders"><span data-ic="folder"></span> Dossiers <span class="nav-badge" id="navFoldersBadge" hidden></span></button>
           <button class="nav-link" data-nav="history"><span data-ic="history"></span> Historique</button>
           <button class="nav-link" data-nav="intros"><span data-ic="music"></span> Bibliothèque d'intros</button>
+          <button class="nav-link" data-nav="trash"><span data-ic="trash"></span> Corbeille</button>
           <button class="nav-link" data-nav="users" id="navUsers" hidden><span data-ic="users"></span> Utilisateurs</button>
+          <button class="nav-link" data-nav="perms" id="navPerms" hidden><span data-ic="lock"></span> Permissions</button>
         </nav>
       </aside>
 
@@ -130,6 +134,26 @@
             <div id="usersList" class="jobs"></div>
           </section>
 
+          <!-- Permissions (administrateur) -->
+          <section id="permsView" hidden>
+            <div class="page-head"><h1>Permissions</h1></div>
+            <p class="hint">Choisissez un utilisateur : définissez ce qu'il peut faire, et quels dossiers d'autres utilisateurs lui sont attribués.</p>
+            <div class="perms-layout">
+              <div id="permsUsers" class="perms-users"></div>
+              <div id="permsPanel" class="perms-panel"></div>
+            </div>
+          </section>
+
+          <!-- Corbeille -->
+          <section id="trashView" hidden>
+            <div class="page-head">
+              <h1>Corbeille</h1>
+              <button class="btn ghost danger" id="trashEmpty" hidden><span data-ic="trash"></span> Vider la corbeille</button>
+            </div>
+            <p class="hint" id="trashHint"></p>
+            <div id="trashList" class="jobs"></div>
+          </section>
+
           <!-- Dossiers : explorateur de fichiers -->
           <section id="foldersView" hidden>
             <div class="explorer-bar">
@@ -179,6 +203,9 @@
                   <select name="intro_id" id="jobIntroSelect"></select>
                   <a class="page-link" data-go="intros" href="#intros">Gérer la bibliothèque d'intros →</a>
                 </label>
+                <label class="full" id="jobAiBox" hidden>IA utilisée
+                  <select name="ai_user" id="jobAiSelect"></select>
+                </label>
                 <details class="full">
                   <summary>Options : forcer le début et la fin de la prédication</summary>
                   <div class="row">
@@ -202,6 +229,9 @@
                 <p class="hint">Préparez une liste de liens YouTube et/ou de fichiers audio ou vidéo, modifiez ou retirez des lignes, puis lancez le tout : les traitements partent dans la file d'attente. <b>Le début et la fin de la prédication se règlent pour chaque ligne.</b> La liste est conservée si vous quittez ou rechargez la page.</p>
                 <label>Intro par défaut de la liste (modifiable ligne par ligne)
                   <select id="batchIntroSelect"></select>
+                </label>
+                <label id="batchAiBox" hidden>IA utilisée pour tout le lot
+                  <select id="batchAiSelect"></select>
                 </label>
                 <div class="source-switch" id="batchSource" role="group" aria-label="Ajouter des liens ou des fichiers">
                   <button type="button" class="active" data-bsrc="url"><span data-ic="link"></span> Liens YouTube</button>
@@ -252,5 +282,6 @@
   <div id="ctxMenu" class="ctx" hidden></div>
   <div id="toasts" class="toasts"></div>
   <script src="/static/app.js"></script>
+  <script src="/static/tour.js"></script>
 </body>
 </html>

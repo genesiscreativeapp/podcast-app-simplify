@@ -4,7 +4,7 @@
 const state = {
   me: null, folders: [], intros: [], current: null, view: "home",
   jobs: [], hist: { items: [], total: 0 }, home: { sig: "", q: null }, detail: null, users: [],
-  expanded: new Set(), lastActive: 0, timers: {},
+  expanded: new Set(), lastActive: 0, timers: {}, aiUsers: [],
 };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -49,6 +49,8 @@ const ICONS = {
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
   moon: '<path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/>',
   upload: '<path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M4 20h16"/>',
+  sparkle: '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z"/>',
+  help: '<circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.4-1 .9-1 1.7M12 17h.01"/>',
 };
 const ic = (n) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n] || ""}</svg>`;
 const hydrateIcons = (root = document) => root.querySelectorAll("[data-ic]").forEach((el) => { el.innerHTML = ic(el.dataset.ic); });
@@ -200,47 +202,70 @@ $("userMenu").addEventListener("click", async (e) => {
   if (b.dataset.user === "logout") {
     await api("/api/auth/logout", { method: "POST" }).catch(() => {});
     showLogin();
+  } else if (b.dataset.user === "ai") {
+    await myAiDialog();
   } else {
-    await modal({
-      title: "Changer mon mot de passe",
-      body: `<label>Mot de passe actuel<input type="password" name="current" autocomplete="current-password"></label>
-             <label>Nouveau mot de passe (8 caractères minimum)<input type="password" name="new" autocomplete="new-password"></label>
-             <label>Confirmer<input type="password" name="confirm" autocomplete="new-password"></label>`,
-      buttons: [{ label: "Annuler", kind: "ghost", value: null }, { label: "Enregistrer", primary: true }],
-      submit: async (dlg) => {
-        const v = (n) => dlg.querySelector(`[name=${n}]`).value;
-        if (v("new") !== v("confirm")) throw new Error("La confirmation ne correspond pas");
-        await api("/api/auth/password", { method: "POST", body: { current: v("current"), new: v("new") } });
-        toast("Mot de passe modifié", "ok");
-      },
-    });
+    await profileDialog();
   }
 });
 
+async function profileDialog() {  // nom affiché et mot de passe : tout utilisateur gère son propre compte
+  const r = await modal({
+    title: "Mon profil",
+    body: `<label>Identifiant<input value="${esc(state.me.username)}" disabled></label>
+      <label>Nom affiché<input name="display_name" value="${esc(state.me.display_name || "")}" maxlength="120" autocomplete="name" placeholder="${esc(state.me.username)}"></label>
+      <div class="d-title">Changer le mot de passe <span class="hint">(facultatif)</span></div>
+      <label>Mot de passe actuel<input type="password" name="current" autocomplete="current-password"></label>
+      <label>Nouveau mot de passe (8 caractères minimum)<input type="password" name="new" autocomplete="new-password"></label>
+      <label>Confirmer<input type="password" name="confirm" autocomplete="new-password"></label>`,
+    buttons: [{ label: "Annuler", kind: "ghost", value: null }, { label: "Enregistrer", primary: true }],
+    submit: async (dlg) => {
+      const v = (n) => dlg.querySelector(`[name=${n}]`).value;
+      const pwd = v("current") || v("new") || v("confirm");
+      if (pwd) {  // d'abord le mot de passe : s'il est refusé, rien d'autre n'est enregistré
+        if (v("new") !== v("confirm")) throw new Error("La confirmation ne correspond pas");
+        await api("/api/auth/password", { method: "POST", body: { current: v("current"), new: v("new") } });
+      }
+      if (v("display_name").trim() !== (state.me.display_name || "")) {
+        state.me = { ...state.me, ...(await api("/api/auth/me", { method: "PATCH", body: { display_name: v("display_name") } })) };
+        paintUser();
+      }
+      return { pwd: !!pwd };
+    },
+  });
+  if (r) toast(r.pwd ? "Profil et mot de passe enregistrés" : "Profil enregistré", "ok");
+}
+
 // ---------- Démarrage et navigation ----------
+function paintUser() {
+  const name = state.me.display_name || state.me.username;
+  $("userName").textContent = name;
+  $("userAvatar").textContent = name.slice(0, 1).toUpperCase();
+}
+
 async function startApp() {
   $("loginScreen").hidden = true;
   $("app").hidden = false;
   $("boot").hidden = true;
-  const name = state.me.display_name || state.me.username;
-  $("userName").textContent = name;
-  $("userAvatar").textContent = name.slice(0, 1).toUpperCase();
-  $("navUsers").hidden = !state.me.is_admin;
+  paintUser();
+  $("navUsers").hidden = $("navPerms").hidden = !state.me.is_admin;
+  $("menuAi").hidden = !(can("ai.key") || can("ai.toggle"));
   $("emptyNewBtn").hidden = !can("folders.manage");
   $("parallelBox").hidden = !can("settings.manage");
   $("introForm").hidden = !can("intros.manage");
-  await Promise.all([loadFolders(), loadIntros()]);
+  await Promise.all([loadFolders(), loadIntros(), loadAiUsers()]);
   await syncBatchUploads();
   loadStatus();
   await route();
   tick();
+  if (!tourSeen()) setTimeout(startTour, 500);  // première connexion de ce compte sur ce navigateur
 }
 
 function route() {
   const h = location.hash.slice(1);
   if (/^\d+$/.test(h) && byId(+h)) return go("folders", +h);
   if (h === "folders") return go("folders");
-  if (h === "history" || h === "intros" || (h === "users" && state.me.is_admin)) return go(h);
+  if (h === "history" || h === "intros" || h === "trash" || ((h === "users" || h === "perms") && state.me.is_admin)) return go(h);
   return go("home");
 }
 
@@ -249,13 +274,15 @@ async function go(view, id = null) {
   state.current = view === "folders" ? id : null;
   const hash = view === "folders" ? (id ? String(id) : "folders") : view;
   if (location.hash.slice(1) !== hash) history.replaceState(null, "", "#" + hash);
-  for (const v of ["home", "folders", "history", "intros", "users"]) $(v + "View").hidden = v !== view;
+  for (const v of ["home", "folders", "history", "intros", "users", "perms", "trash"]) $(v + "View").hidden = v !== view;
   document.querySelectorAll(".nav-link").forEach((b) => b.classList.toggle("active", b.dataset.nav === view));
   $("sidebar").classList.remove("open");
   if (view === "home") await loadHome();
   else if (view === "history") await loadHistory();
   else if (view === "intros") { renderIntroList(); await loadIntros(); }
   else if (view === "users") await loadUsers();
+  else if (view === "perms") await loadPerms();
+  else if (view === "trash") await loadTrash();
   else if (view === "folders") { state.jobs = []; state.sel = null; $("newJobPanel").hidden = true; $("foldSearch").value = ""; renderExplorer(); await loadJobs(); }
 }
 window.addEventListener("hashchange", () => { if (state.me) route(); });
@@ -330,6 +357,11 @@ function renderSteps(j, open = false) {
     : `<ul class="steps">${rows}</ul>`;
 }
 
+const fmtTok = (n) => n.toLocaleString("fr-FR");
+// Consommation de l'IA, mise à jour après chaque appel (toutes les quelques secondes pendant un traitement)
+const tokensLine = (j) => (j.tokens_in || j.tokens_out)
+  ? `<div class="tokens" title="Tokens échangés avec l'IA pour ce traitement">${ic("sparkle")} IA : <b>${fmtTok(j.tokens_in + j.tokens_out)}</b> tokens <small>(${fmtTok(j.tokens_in)} envoyés · ${fmtTok(j.tokens_out)} reçus)</small></div>` : "";
+
 function liveBlock(j) {  // rang dans la file, ou barre globale s'il tourne
   if (j.status === "pending") {
     const note = j.step && j.step !== "En attente" ? ` · ${esc(j.step)}` : "";
@@ -338,7 +370,7 @@ function liveBlock(j) {  // rang dans la file, ou barre globale s'il tourne
   if (j.status !== "running") return "";
   const pct = Math.round(j.progress * 100);
   return `<div class="progress"><div style="width:${pct}%"></div></div>
-    <div class="step"><b>Global ${pct}%</b> — ${esc(j.step)}</div>`;
+    <div class="step"><b>Global ${pct}%</b> — ${esc(j.step)}</div>${tokensLine(j)}`;
 }
 
 const isLive = (j) => j.status === "pending" || j.status === "running";
@@ -378,6 +410,7 @@ function activeCard(j) {
     ${head}
       <div class="ac-step"><span class="live"></span><b>${esc(j.step)}</b>${idx >= 0 ? `<small>· étape ${idx + 1}/${vis.length}</small>` : ""}</div>
       <div class="pips">${vis.map((x) => `<i class="${x.state}" style="--w:${x.pct}%" title="${esc(x.label)} — ${x.pct}%"></i>`).join("")}</div>
+      ${tokensLine(j)}
     </div>
     ${actions}</div>`;
 }
@@ -432,12 +465,12 @@ async function handleAction(act, id, btn) {
     else if (act === "rename") await renameJob(job);
     else if (act === "delete") {
       const ok = await confirmBox({ title: "Supprimer ce traitement ?",
-        message: `« <b>${esc(job.title)}</b> » sera supprimé, ainsi que ses fichiers (y compris sur R2). Cette action est définitive.`,
-        confirmLabel: "Supprimer", danger: true });
+        message: `« <b>${esc(job.title)}</b> » sera déplacé dans la <b>corbeille</b> : vous pourrez le restaurer. Seul un administrateur peut le supprimer définitivement.`,
+        confirmLabel: "Mettre à la corbeille" });
       if (!ok) return;
       await api(`/api/jobs/${id}`, { method: "DELETE" });
       if (state.detail?.id === id) $("detailDialog").close();
-      toast("Traitement supprimé", "ok");
+      toast("Traitement mis à la corbeille", "ok");
       refreshView();
     }
   } catch (err) { toast(err.message, true); }
@@ -453,12 +486,14 @@ async function retryDialog(job) {
     body: `<p>Corrigez les bornes si la prédication détectée n'était pas la bonne. Vide = détection automatique.</p>
       <div class="row"><label>Début<input name="start" placeholder="1:05:30" value="${esc(job.start_override || job.sermon_start || "")}"></label>
       <label>Fin<input name="end" placeholder="2:10:00" value="${esc(job.end_override || job.sermon_end || "")}"></label></div>
-      <label>Intro<select name="intro_id">${introOptions([["keep", "Ne pas changer"], ["", "Automatique (dossier, sinon par défaut)"]], true, "keep")}</select></label>`,
+      <label>Intro<select name="intro_id">${introOptions([["keep", "Ne pas changer"], ["", "Automatique (dossier, sinon par défaut)"]], true, "keep")}</select></label>
+      ${state.me.is_admin ? `<label>IA utilisée<select name="ai_user">${aiOptions([["keep", "Ne pas changer"]], "keep")}</select></label>` : ""}`,
     buttons: [{ label: "Annuler", kind: "ghost", value: null }, { label: "Relancer", primary: true }],
     submit: async (dlg) => {
       const v = (n) => dlg.querySelector(`[name=${n}]`).value;
       const body = { start: v("start"), end: v("end") };
       if (v("intro_id") !== "keep") body.intro_id = v("intro_id") === "" ? null : +v("intro_id");
+      if (state.me.is_admin && v("ai_user") !== "keep") body.ai_user = v("ai_user");
       await api(`/api/jobs/${job.id}/retry`, { method: "POST", body });
     },
   });
@@ -533,24 +568,84 @@ async function trimDialog(job) {
 }
 
 // ---------- Statut, parallélisme ----------
-function aiPill(s) {  // l'administrateur clique pour activer / désactiver l'IA
-  if (!s.ai_available) return '<span class="pill" title="Aucun fournisseur d\'IA configuré (LLM_PROVIDER)">Détection heuristique</span>';
-  const label = s.ai_enabled ? `IA activée (${esc(s.llm_provider)})` : "IA désactivée";
-  return state.me.is_admin ? `<button type="button" class="pill link ${s.ai_enabled ? "on" : "off"}" data-ai title="Activer / désactiver l'IA">${label}</button>`
+function aiPill(s) {  // cliquable : l'administrateur règle l'IA du serveur, les autres leur IA personnelle (selon leurs droits)
+  const open = state.me.is_admin || can("ai.key") || can("ai.toggle");
+  if (!s.ai_available) return open
+    ? `<button type="button" class="pill link" data-ai title="${state.me.is_admin ? "Configurer l'IA du serveur" : "Ajouter ma clé Anthropic pour utiliser l'IA"}">${state.me.is_admin ? "IA non configurée" : "Détection heuristique · ajouter ma clé"}</button>`
+    : '<span class="pill" title="Aucune IA n\'est configurée par l\'administrateur">Détection heuristique</span>';
+  const label = s.ai_enabled ? `IA activée${s.ai_personal ? " (ma clé)" : ""}` : "IA désactivée";
+  return open ? `<button type="button" class="pill link ${s.ai_enabled ? "on" : "off"}" data-ai title="Régler l'IA">${label}</button>`
     : `<span class="pill ${s.ai_enabled ? "on" : ""}">${label}</span>`;
 }
-async function aiDialog() {
-  const s = state.status, on = s.ai_enabled;
-  const r = await modal({
-    title: "Utilisation de l'IA", icon: "✨",
-    body: `<p>L'IA (${esc(s.llm_provider)}) repère le début et la fin de la prédication et retire l'adoration, les témoignages et les annonces. Elle est actuellement <b>${on ? "activée" : "désactivée"}</b>.</p>
-      <p>${on ? "En la désactivant : repérage par heuristique (moins fiable), adoration, témoignages et annonces <b>non retirés</b>, et plus aucun appel (donc aucun coût) vers l'API."
-        : "En l'activant : les prochains traitements utilisent l'IA (appels payants à l'API : vérifiez votre crédit)."}</p>
-      <p class="hint">S'applique aux traitements qui démarrent à partir de maintenant ; ceux déjà en cours gardent leur choix.</p>`,
-    buttons: [{ label: "Annuler", kind: "ghost", value: null }, { label: on ? "Désactiver l'IA" : "Activer l'IA", kind: on ? "danger-fill" : "", primary: true }],
-    submit: () => api("/api/settings/ai", { method: "PUT", body: { enabled: !on } }),
+// Compteur de tokens : mis à jour après chaque appel à l'IA (le statut est relu toutes les quelques secondes)
+const usagePill = (s) => (s.ai_available || s.ai_usage?.total)
+  ? `<button type="button" class="pill link" data-usage title="Consommation de l'IA ce mois-ci (clic : détail)">${ic("sparkle")} ${fmtTok(s.ai_usage?.month || 0)} tokens</button>` : "";
+async function usageDialog() {
+  const u = await api("/api/ai/usage"), t = (x) => fmtTok(x.in + x.out);
+  const line = (label, x) => `<dt>${label}</dt><dd><b>${t(x)}</b> tokens <small>(${fmtTok(x.in)} envoyés · ${fmtTok(x.out)} reçus${x.calls != null ? ` · ${plural(x.calls, "appel", "appels")}` : ""})</small></dd>`;
+  const keys = u.keys ? `<div class="d-title">Par clé (administrateur)</div>
+    ${u.keys.length ? `<table class="usage-table"><thead><tr><th>Clé</th><th>Ce mois</th><th>Total</th><th>Appels</th></tr></thead><tbody>
+      ${u.keys.map((k) => `<tr><td>${esc(k.name)}</td><td>${fmtTok(k.month)}</td><td>${fmtTok(k.total_in + k.total_out)}</td><td>${k.calls}</td></tr>`).join("")}</tbody></table>` : '<p class="hint">Aucune consommation enregistrée.</p>'}` : "";
+  await modal({
+    title: "Consommation de l'IA", icon: "✨", wide: !!u.keys,
+    body: `<dl class="kv">${line("Ce mois-ci", u.month)}${line("Depuis le début", u.total)}</dl>
+      ${u.others_on_my_key_month.in + u.others_on_my_key_month.out ? `<p class="hint">Dont ${fmtTok(u.others_on_my_key_month.in + u.others_on_my_key_month.out)} tokens ce mois-ci facturés sur votre clé pour des traitements qu'un administrateur a lancés avec votre configuration.</p>` : ""}
+      ${keys}
+      <p class="hint">Les tokens sont ceux que l'IA a lus et écrits ; ce compteur ne chiffre pas le coût. Il s'actualise après chaque appel à l'IA, pendant les traitements.</p>`,
+    buttons: [{ label: "Fermer", kind: "ghost", value: null }],
   });
-  if (r) { toast(on ? "IA désactivée" : "IA activée", "ok"); await loadStatus(); refreshView(); }
+}
+async function aiDialog() {  // administrateur : IA du serveur, pour tous ceux qui n'ont pas leur propre clé
+  const c = await api("/api/settings/llm");
+  const r = await modal({
+    title: "IA du serveur", icon: "✨",
+    body: `<p>L'IA repère le début et la fin de la prédication et retire l'adoration, les témoignages et les annonces. Cette clé Anthropic sert aux utilisateurs qui n'ont pas enregistré la leur.</p>
+      <label>Clé API Anthropic ${c.configured ? `<span class="hint">(enregistrée : ${esc(c.key_hint)})</span>` : ""}
+        <input name="key" type="password" autocomplete="off" placeholder="${c.configured ? "Laisser vide pour la conserver" : "sk-ant-…"}"></label>
+      <label>Modèle<select name="model">${Object.entries(c.models).map(([id, l]) => `<option value="${esc(id)}" ${id === c.model ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
+      <label class="check"><input type="checkbox" name="on" ${c.enabled ? "checked" : ""} ${c.configured ? "" : "disabled"}> IA du serveur activée</label>
+      <p class="hint">La clé est vérifiée par un petit appel à l'enregistrement, puis stockée chiffrée. Décochez « activée » pour ne rien dépenser sans effacer la clé : repérage par heuristique, adoration, témoignages et annonces non retirés. S'applique aux traitements qui démarrent ensuite ; ceux en cours vont au bout avec l'IA choisie au départ.</p>`,
+    buttons: [{ label: "Annuler", kind: "ghost", value: null }, { label: "Mon IA personnelle…", kind: "ghost", value: "mine" },
+      ...(c.configured ? [{ label: "Supprimer la clé", kind: "danger", value: "delete" }] : []), { label: "Enregistrer", primary: true }],
+    submit: async (dlg) => {
+      const key = dlg.querySelector("[name=key]").value.trim(), model = dlg.querySelector("[name=model]").value;
+      let enabled = c.enabled;
+      if (key || model !== c.model || !c.configured) {
+        if (!key && !c.configured) throw new Error("Saisissez la clé API Anthropic");
+        enabled = (await api("/api/settings/llm", { method: "PUT", body: { key, model } })).enabled;
+      }
+      const want = c.configured ? dlg.querySelector("[name=on]").checked : true;
+      if (want !== enabled) await api("/api/settings/ai", { method: "PUT", body: { enabled: want } });
+    },
+  });
+  if (r === "mine") return myAiDialog();
+  if (r === "delete") {
+    if (!(await confirmBox({ title: "Supprimer la clé du serveur ?", confirmLabel: "Supprimer la clé", danger: true,
+      message: "Sans clé, les utilisateurs qui n'ont pas la leur retombent sur le repérage par heuristique, sans retrait des témoignages et annonces." }))) return;
+    await api("/api/settings/llm", { method: "DELETE" });
+  }
+  if (r) { toast(r === "delete" ? "Clé du serveur supprimée" : "IA du serveur enregistrée", "ok"); await loadStatus(); refreshView(); }
+}
+async function myAiDialog() {  // clé Anthropic personnelle et interrupteur pour ses propres traitements
+  const m = await api("/api/me/ai");
+  const r = await modal({
+    title: "Mon IA", icon: "✨",
+    body: `<p>L'IA repère la prédication et retire l'adoration, les témoignages et les annonces de <b>vos</b> traitements.</p>
+      ${m.can_toggle ? `<label class="check"><input type="checkbox" name="ai_on" ${m.enabled ? "checked" : ""}> Utiliser l'IA pour mes traitements</label>` : ""}
+      ${m.can_key ? `<label>Ma clé Anthropic ${m.has_key ? `<span class="hint">(enregistrée : ${esc(m.key_hint)})</span>` : ""}
+          <input name="key" type="password" autocomplete="off" placeholder="${m.has_key ? "Laisser vide pour la conserver" : "sk-ant-…"}"></label>
+        <p class="hint">${m.has_key ? "Vos traitements utilisent votre clé : les appels sont facturés sur votre compte Anthropic." : m.server_ai ? "Sans clé personnelle, la clé du serveur est utilisée (si l'administrateur l'a activée)." : "Aucune IA n'est configurée sur le serveur : ajoutez votre clé pour en profiter."}
+          Elle est vérifiée à l'enregistrement, stockée chiffrée sur le serveur. Elle sert à vos traitements, et à ceux qu'un administrateur choisit explicitement de lancer avec votre configuration. Créez-en une sur console.anthropic.com.</p>` : ""}`,
+    buttons: [{ label: "Annuler", kind: "ghost", value: null }, ...(m.has_key ? [{ label: "Supprimer ma clé", kind: "danger", value: "delete" }] : []),
+      { label: "Enregistrer", primary: true }],
+    submit: async (dlg) => {
+      const on = dlg.querySelector("[name=ai_on]"), key = dlg.querySelector("[name=key]")?.value.trim();
+      if (key) await api("/api/me/ai/key", { method: "PUT", body: { key } });
+      if (on && on.checked !== m.enabled) await api("/api/me/ai", { method: "PUT", body: { enabled: on.checked } });
+    },
+  });
+  if (r === "delete") await api("/api/me/ai/key", { method: "DELETE" });
+  if (r) { toast(r === "delete" ? "Clé supprimée" : "Réglages de l'IA enregistrés", "ok"); await loadStatus(); refreshView(); }
 }
 
 function r2Pill(s) {
@@ -579,7 +674,8 @@ async function r2Dialog() {
 }
 $("statusBar").addEventListener("click", (e) => {
   if (e.target.closest("[data-r2]")) r2Dialog();
-  else if (e.target.closest("[data-ai]")) aiDialog();
+  else if (e.target.closest("[data-usage]")) usageDialog();
+  else if (e.target.closest("[data-ai]")) (state.me.is_admin ? aiDialog : myAiDialog)();
 });
 
 async function loadStatus() {
@@ -588,6 +684,7 @@ async function loadStatus() {
   $("statusBar").innerHTML = `
     ${r2Pill(s)}
     ${aiPill(s)}
+    ${usagePill(s)}
     <span class="pill link ${s.running ? "busy" : ""}" data-status="active">▶ ${s.running}/${s.max_parallel} en cours</span>
     <span class="pill link ${s.pending ? "waiting" : ""}" data-status="active">⏳ ${s.pending} en file</span>`;
   const mb = s.max_upload_mb;
@@ -847,14 +944,14 @@ async function renameJob(j) {
   if (r) { refreshView(); loadStatus(); toast("Podcast renommé" + (state.status?.r2 ? " — R2 se met à jour" : ""), "ok"); }
 }
 async function deleteFolder(f) {
-  const ok = await confirmBox({ title: "Supprimer le dossier ?", danger: true, confirmLabel: "Supprimer",
-    message: `Le dossier « <b>${esc(f.name)}</b> » sera supprimé. Il doit être vide (ni sous-dossier ni traitement).` });
+  const ok = await confirmBox({ title: "Supprimer le dossier ?", confirmLabel: "Mettre à la corbeille",
+    message: `Le dossier « <b>${esc(f.name)}</b> » sera déplacé dans la <b>corbeille</b> (vous pourrez le restaurer). Il doit être vide (ni sous-dossier ni traitement).` });
   if (!ok) return;
   try {
     await api(`/api/folders/${f.id}`, { method: "DELETE" });
     state.sel = null;
     await loadFolders();
-    toast("Dossier supprimé", "ok");
+    toast("Dossier mis à la corbeille", "ok");
   } catch (err) { alertBox({ title: "Suppression impossible", message: esc(err.message), kind: "danger" }); }
 }
 
@@ -1041,6 +1138,7 @@ $("emptyNewBtn").onclick = () => createFolder(null);
 function openNewJob() {
   const f = byId(state.current);
   if (!f) return;
+  loadAiUsers();  // les clés enregistrées ont pu changer depuis le chargement de la page
   $("newJobWhere").textContent = `« ${f.name} »`;
   $("newJobPanel").hidden = false;
   updateFilenamePreview();
@@ -1072,6 +1170,20 @@ function effectiveIntro(folder) {  // intro du dossier, sinon du parent le plus 
   return d ? { name: d.name, id: d.id, from: null } : null;
 }
 
+// Administrateur : l'IA d'un traitement peut être celle d'un autre utilisateur (sa clé Anthropic) ou celle du serveur
+const aiOptions = (extra = [], selected = "") => [...extra, ["", "Automatique (configuration de l'auteur du traitement)"], ["@server", "IA du serveur"],
+  ...state.aiUsers.map((u) => [u.username, `Clé de ${u.display_name || u.username}`])]
+  .map(([v, l]) => `<option value="${esc(v)}" ${v === selected ? "selected" : ""}>${esc(l)}</option>`).join("");
+const aiLabel = (j) => j.ai_user === "@server" ? "IA du serveur (choisie par un administrateur)"
+  : j.ai_user ? `Clé de « ${j.ai_user} » (choisie par un administrateur)` : "Configuration de l'auteur du traitement";
+
+async function loadAiUsers() {
+  if (!state.me.is_admin) return;
+  state.aiUsers = (await api("/api/users").catch(() => [])).filter((u) => u.ai_key && u.is_active);
+  for (const id of ["jobAiSelect", "batchAiSelect"]) $(id).innerHTML = aiOptions([], $(id).value);
+  $("jobAiBox").hidden = $("batchAiBox").hidden = false;
+}
+
 function renderIntroSelects() {  // un sélecteur par mode : l'intro d'un traitement individuel et celle d'un lot sont indépendantes
   for (const id of ["jobIntroSelect", "batchIntroSelect"]) {
     const keep = $(id).value;
@@ -1097,7 +1209,7 @@ function renderIntroList() {
         ${manage ? `<div class="actions">
           ${i.is_default ? "" : `<button class="btn small ghost" data-intro="default" data-id="${i.id}">★ Par défaut</button>`}
           <button class="btn small ghost" data-intro="rename" data-id="${i.id}">Renommer</button>
-          <button class="btn small ghost danger" data-intro="delete" data-id="${i.id}">Supprimer</button>
+          ${state.me.is_admin ? `<button class="btn small ghost danger" data-intro="delete" data-id="${i.id}">Supprimer</button>` : ""}
         </div>` : ""}
       </div>
       <audio controls preload="none" src="/api/intros/${i.id}/audio"></audio>
@@ -1120,7 +1232,7 @@ $("introList").addEventListener("click", async (e) => {
         if (!r) return;
       } else if (b.dataset.intro === "delete") {
         const ok = await confirmBox({ title: "Supprimer cette intro ?", danger: true, confirmLabel: "Supprimer",
-          message: `« <b>${esc(intro.name)}</b> » sera supprimée. Les dossiers et traitements qui l'utilisaient repasseront en automatique.` });
+          message: `« <b>${esc(intro.name)}</b> » sera supprimée <b>définitivement</b> (les intros n'ont pas de corbeille). Les dossiers et traitements qui l'utilisaient repasseront en automatique.` });
         if (!ok) return;
         const r = await api(`/api/intros/${id}`, { method: "DELETE" });
         await loadFolders();
@@ -1216,7 +1328,7 @@ async function submitFile() {
   if (file.size > max) throw new Error(`Fichier trop volumineux (maximum ${fmtSize(max)})`);
   const fd = new FormData();
   fd.append("folder_id", state.current);
-  for (const k of ["title", "date", "start", "end", "intro_id"]) fd.append(k, form[k].value);
+  for (const k of ["title", "date", "start", "end", "intro_id", "ai_user"]) fd.append(k, form[k].value);
   fd.append("file", file);
   $("uploadProgress").hidden = false;
   try {
@@ -1450,7 +1562,7 @@ $("batchRunBtn").onclick = (e) => busy(e.currentTarget, async () => {
         const err = checkRow(r);
         if (err) throw new Error(err);
         await api("/api/jobs", { method: "POST", body: { folder_id: folder, ...(r.kind === "file" ? { upload_id: r.uploadId } : { youtube_url: r.url }),
-          title: r.title, date: r.date, start: r.start || null, end: r.end || null, intro_id: intro === "" ? null : +intro } });
+          title: r.title, date: r.date, start: r.start || null, end: r.end || null, intro_id: intro === "" ? null : +intro, ai_user: $("batchAiSelect").value } });
         batch = batch.filter((x) => x !== r);
         ok++;
       } catch (err) { r.error = err.message; }
@@ -1498,6 +1610,7 @@ async function openDetail(id, silent = false) {
     <dl class="kv">
       ${row("Fichier", esc(j.display_filename))}
       ${admin ? `${row("Intro", esc(j.intro_name))}
+      ${row("IA utilisée", esc(aiLabel(j)))}
       ${row("Source", j.from_upload ? `Fichier envoyé : ${esc(j.video_title || "")}` : "")}
       ${row("Vidéo", j.youtube_url && !j.from_upload ? `<a href="${esc(j.youtube_url)}" target="_blank" rel="noopener">${esc(j.video_title || j.youtube_url)}</a>` : "")}
       ${row("Prédication", j.sermon_start ? `${j.sermon_start} → ${j.sermon_end}` : "")}
@@ -1507,6 +1620,7 @@ async function openDetail(id, silent = false) {
       ${row("Durée de la vidéo", j.duration_source)}` : ""}
       ${row("Durée du podcast", j.duration_output)}
       ${row("Taille", j.size_mp3 ? fmtSize(j.size_mp3) : "")}
+      ${row("Tokens IA", j.tokens_in || j.tokens_out ? `${fmtTok(j.tokens_in + j.tokens_out)} (${fmtTok(j.tokens_in)} envoyés · ${fmtTok(j.tokens_out)} reçus)` : "")}
       ${row("Créé par", esc(j.created_by || ""))}
       ${row("Créé le", fmtDate(j.created_at))}
       ${row("Terminé le", j.finished_at ? fmtDate(j.finished_at) : "")}
@@ -1613,6 +1727,128 @@ $("usersList").addEventListener("click", async (e) => {
     } catch (err) { alertBox({ title: "Action impossible", message: esc(err.message), kind: "danger" }); }
   });
 });
+
+// ---------- Permissions (administrateur) ----------
+const permsState = { id: null, folders: null };
+async function loadPerms() {
+  state.users = await api("/api/users");
+  if (!state.users.some((u) => u.id === permsState.id)) permsState.id = (state.users.find((u) => !u.is_admin) || state.users[0])?.id ?? null;
+  renderPermsUsers();
+  await renderPermsPanel();
+}
+function renderPermsUsers() {
+  $("permsUsers").innerHTML = state.users.map((u) => `
+    <button type="button" class="pu ${u.id === permsState.id ? "active" : ""}" data-pu="${u.id}">
+      <span class="avatar">${esc((u.display_name || u.username).slice(0, 1).toUpperCase())}</span>
+      <span><b>${esc(u.display_name || u.username)}</b><small>@${esc(u.username)}${u.is_admin ? " · administrateur" : ""}${u.is_active ? "" : " · désactivé"}</small></span>
+    </button>`).join("");
+}
+async function renderPermsPanel() {
+  const u = state.users.find((x) => x.id === permsState.id), box = $("permsPanel");
+  if (!u) { box.innerHTML = ""; return; }
+  const name = esc(u.display_name || u.username);
+  if (u.is_admin) {
+    box.innerHTML = `<div class="card"><h3>${name}</h3><p class="hint">Administrateur : toutes les actions sont autorisées et tous les dossiers sont visibles, y compris la corbeille de chacun. Ses droits ne se règlent pas ici.</p></div>`;
+    return;
+  }
+  const f = await api(`/api/users/${u.id}/folders`);
+  if (u.id !== permsState.id) return;  // l'administrateur a changé d'utilisateur pendant le chargement
+  permsState.folders = f;
+  const who = (c) => (c ? `créé par ${esc(c)}` : "créé par l'administration");
+  box.innerHTML = `
+    <div class="card">
+      <h3>${name} <small class="muted">@${esc(u.username)}</small></h3>
+      <div class="d-title">1 · Actions autorisées</div>
+      <div class="perm-list">${Object.entries(state.me.catalog).map(([k, l]) =>
+        `<label><input type="checkbox" name="perm" value="${k}" ${u.permissions.includes(k) ? "checked" : ""}> ${esc(l)}</label>`).join("")}</div>
+      <div class="dialog-foot"><button class="btn" data-perms="save">Enregistrer les actions</button></div>
+    </div>
+    <div class="card">
+      <div class="d-title">2 · Dossiers</div>
+      <p class="hint">Dossiers qu'il a créés lui-même :</p>
+      <ul class="plist">${f.own.length ? f.own.map((d) => `<li>${ic("folder")} ${esc(d.path)}</li>`).join("") : '<li class="muted">Aucun</li>'}</ul>
+      <p class="hint">Dossiers d'autres utilisateurs qui lui sont attribués (sous-dossiers inclus). Il y travaille sans pouvoir les modifier ni les supprimer :</p>
+      <ul class="plist">${f.assigned.length ? f.assigned.map((d) => `<li>${ic("folder")} ${esc(d.path)} <small class="muted">· ${who(d.created_by)}</small>
+        <button class="icon-btn" data-perms="unassign" data-id="${d.id}" title="Retirer ce dossier" aria-label="Retirer ce dossier">✕</button></li>`).join("") : '<li class="muted">Aucun</li>'}</ul>
+      ${f.available.length ? `<div class="perm-add"><select id="permsAdd">${f.available.map((d) => `<option value="${d.id}">${esc(d.path)} — ${who(d.created_by)}</option>`).join("")}</select>
+        <button class="btn" data-perms="assign">Attribuer</button></div>` : '<p class="hint">Aucun autre dossier à attribuer.</p>'}
+    </div>`;
+}
+$("permsUsers").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-pu]");
+  if (!b) return;
+  permsState.id = +b.dataset.pu;
+  renderPermsUsers();
+  renderPermsPanel();
+});
+$("permsPanel").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-perms]");
+  if (!b) return;
+  const u = state.users.find((x) => x.id === permsState.id), act = b.dataset.perms;
+  const ids = permsState.folders.assigned.map((d) => d.id);
+  await busy(b, async () => {
+    try {
+      if (act === "save") {
+        const upd = await api(`/api/users/${u.id}`, { method: "PATCH", body: { permissions: [...$("permsPanel").querySelectorAll("[name=perm]:checked")].map((c) => c.value) } });
+        Object.assign(u, upd);
+        toast(`Actions de ${u.display_name || u.username} enregistrées`, "ok");
+      } else {
+        const next = act === "assign" ? [...ids, +$("permsAdd").value] : ids.filter((i) => i !== +b.dataset.id);
+        await api(`/api/users/${u.id}/folders`, { method: "PUT", body: { folder_ids: next } });
+        toast(act === "assign" ? "Dossier attribué" : "Dossier retiré", "ok");
+        await renderPermsPanel();
+        loadFolders();
+      }
+    } catch (err) { toast(err.message, true); }
+  });
+});
+
+// ---------- Corbeille ----------
+async function loadTrash() {
+  const items = await api("/api/trash"), admin = state.me.is_admin;
+  $("trashHint").textContent = admin
+    ? "Vous voyez tout ce qui a été supprimé, par tout le monde. Seul un administrateur supprime définitivement."
+    : "Ce que vous avez supprimé est ici : restaurez-le quand vous voulez. Seul un administrateur peut le supprimer définitivement.";
+  $("trashEmpty").hidden = !admin || !items.length;
+  $("trashList").innerHTML = items.length ? items.map((i) => `
+    <div class="trash-row">
+      <span class="t-ic">${ic(i.kind === "folder" ? "folder" : "music")}</span>
+      <div class="t-main"><b>${esc(i.name)}</b>${i.detail ? ` <span class="muted">· ${esc(i.detail)}</span>` : ""}
+        <div class="job-sub">${i.kind === "folder" ? "Dossier" : "Podcast"}${i.path ? ` · dans ${esc(i.path)}` : ""} · supprimé ${admin ? `par ${esc(i.deleted_by)} ` : ""}le ${fmtDate(i.deleted_at)}</div></div>
+      <div class="actions">
+        <button class="btn small ghost" data-trash="restore" data-kind="${i.kind}" data-id="${i.id}" ${i.blocked ? 'disabled title="Restaurez d\'abord le dossier qui le contient"' : ""}>${ic("retry")} Restaurer</button>
+        ${admin ? `<button class="btn small ghost danger" data-trash="purge" data-kind="${i.kind}" data-id="${i.id}" data-name="${esc(i.name)}">${ic("trash")} Supprimer définitivement</button>` : ""}
+      </div>
+    </div>`).join("") : '<div class="card muted">La corbeille est vide.</div>';
+}
+$("trashList").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-trash]");
+  if (!b) return;
+  const { kind, id } = b.dataset, base = `/api/trash/${kind}/${id}`;
+  try {
+    if (b.dataset.trash === "restore") {
+      await busy(b, () => api(`${base}/restore`, { method: "POST" }));
+      toast("Restauré", "ok");
+    } else {
+      const ok = await confirmBox({ title: "Supprimer définitivement ?", danger: true, confirmLabel: "Supprimer définitivement",
+        message: kind === "folder"
+          ? `Le dossier « <b>${esc(b.dataset.name)}</b> » et tout ce qu'il contient (déjà dans la corbeille) seront supprimés <b>pour toujours</b>, y compris sur R2. Cette action est irréversible.`
+          : `« <b>${esc(b.dataset.name)}</b> » sera supprimé <b>pour toujours</b>, avec ses fichiers (y compris sur R2). Cette action est irréversible.` });
+      if (!ok) return;
+      await busy(b, () => api(base, { method: "DELETE" }));
+      toast("Supprimé définitivement", "ok");
+    }
+    await loadTrash();
+    loadFolders();
+  } catch (err) { alertBox({ title: "Action impossible", message: esc(err.message), kind: "danger" }); }
+});
+$("trashEmpty").onclick = async (e) => {
+  const ok = await confirmBox({ title: "Vider la corbeille ?", danger: true, confirmLabel: "Tout supprimer définitivement",
+    message: "Tout ce qui est dans la corbeille, <b>de tous les utilisateurs</b>, sera supprimé pour toujours, y compris sur R2. Cette action est irréversible." });
+  if (!ok) return;
+  try { await busy(e.currentTarget, () => api("/api/trash", { method: "DELETE" })); toast("Corbeille vidée", "ok"); await loadTrash(); loadFolders(); }
+  catch (err) { alertBox({ title: "Action impossible", message: esc(err.message), kind: "danger" }); }
+};
 
 // ---------- Démarrage ----------
 hydrateIcons();

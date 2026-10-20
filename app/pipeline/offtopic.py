@@ -35,15 +35,16 @@ Transcription :
 {transcript}"""
 
 
-def _ask_chunk(lines: list[str], part: str) -> list[dict]:
-    answer = ask_llm(PROMPT.format(part=part, transcript="\n".join(lines)), max_tokens=1500)
+def _ask_chunk(lines: list[str], part: str, llm: dict, on_usage) -> list[dict]:
+    answer = ask_llm(PROMPT.format(part=part, transcript="\n".join(lines)), llm, max_tokens=1500, on_usage=on_usage)
     match = re.search(r"\{.*\}", answer, re.S)
     if not match:
         raise ValueError(f"réponse illisible : {answer[:120]}")
     return json.loads(match.group(0)).get("retirer", [])
 
 
-def find_offtopic(segments: list[dict], log: Callable[[str], None]) -> tuple[list[tuple[float, float]], str, bool]:
+def find_offtopic(segments: list[dict], log: Callable[[str], None], llm: dict,
+                  on_usage=None) -> tuple[list[tuple[float, float]], str, bool]:
     """(plages à retirer en secondes, bilan lisible, ok). `ok` est faux si l'IA n'a pas pu répondre.
     `segments` : {start, end, text}."""
     if not segments:
@@ -55,7 +56,7 @@ def find_offtopic(segments: list[dict], log: Callable[[str], None]) -> tuple[lis
         lines = [f"[{i}] {fmt_time(segments[i]['start'])[2:]} {segments[i]['text']}" for i in rng]
         part = f" (partie {n} sur {len(chunks)})" if len(chunks) > 1 else ""
         try:
-            found = _ask_chunk(lines, part)
+            found = _ask_chunk(lines, part, llm, on_usage)
         except Exception as exc:  # réseau, quota, JSON...
             log(f"Retrait des témoignages impossible ({exc})")
             failed = True

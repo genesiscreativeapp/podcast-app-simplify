@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .. import config, r2sync, storage
-from ..db import Folder, Job, SessionLocal, ai_enabled, resolve_intro
+from ..db import AI_SERVER, AiUsage, Folder, Job, SessionLocal, job_ai, resolve_intro
 from ..utils import fmt_time
 from . import audio, steps
 from .detect import detect_sermon
@@ -19,8 +19,9 @@ from .transcribe import transcribe_sampled, transcribe_words
 class Reporter:
     """Écrit l'avancement dans la base (lu par l'interface toutes les quelques secondes)."""
 
-    def __init__(self, job_id: int):
+    def __init__(self, job_id: int, ai_owner: str | None = None):
         self.job_id = job_id
+        self.ai_owner = ai_owner  # à qui facturer les appels à l'IA (propriétaire de la clé, ou « @server »)
         self._last = 0.0
 
     def _update(self, **fields):
@@ -41,6 +42,19 @@ class Reporter:
                 job.log = (job.log or "") + line
                 s.commit()
 
+    def tokens(self, n_in: int, n_out: int):
+        """Cumule les tokens de l'IA de ce traitement et les inscrit au registre des compteurs
+        (l'interface les lit toutes les quelques secondes)."""
+        with SessionLocal() as s:
+            job = s.get(Job, self.job_id)
+            if job:
+                job.tokens_in = (job.tokens_in or 0) + n_in
+                job.tokens_out = (job.tokens_out or 0) + n_out
+                s.add(AiUsage(username=self.ai_owner or "@server", author=job.created_by, job_id=job.id,
+                              tokens_in=n_in, tokens_out=n_out))
+                s.commit()
+        self.log(f"IA : {n_in} tokens en entrée, {n_out} en sortie")
+
     def step(self, key: str):
         """Démarre une étape : la barre globale se place au début de sa part."""
         label, lo, _hi = steps.BY_KEY[key]
@@ -60,20 +74,24 @@ class Reporter:
 
 
 def run_job(job_id: int) -> None:
-    rep = Reporter(job_id)
     with SessionLocal() as s:
         job = s.get(Job, job_id)
         folder = s.get(Folder, job.folder_id)
         intro = resolve_intro(s, folder, job.intro_id)
-        use_ai = ai_enabled(s)  # décidé au démarrage : tout le traitement suit le même choix
+        # Décidé au démarrage : le traitement va au bout avec cette IA. Couper l'IA ensuite ne vaut que pour les traitements suivants.
+        llm = job_ai(s, job)
         url, title, date, filename = job.youtube_url, job.title, job.date, job.filename
         known_title = job.video_title
+        ai_chosen = job.ai_user  # choisi par un administrateur
         start_ov, end_ov = job.start_override, job.end_override
 
+    use_ai = llm is not None
+    rep = Reporter(job_id, llm and llm["owner"])
     work = config.WORK_DIR / str(job_id)
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
     t0 = time.monotonic()
+    rep._update(tokens_in=0, tokens_out=0)  # consommation de CE passage (un « Relancer » repart de zéro ; le journal garde l'historique)
 
     try:
         # 1-2. Téléchargement de l'audio seul (réutilisé tel quel lors d'un « Relancer »)
@@ -108,9 +126,11 @@ def run_job(job_id: int) -> None:
             audio.to_whisper(src, wav16, duration, rep.sub("detect", 0.0, 0.1))
             segs = transcribe_sampled(wav16, duration, rep.sub("detect", 0.1, 1.0))
             wav16.unlink(missing_ok=True)
-            if config.LLM_PROVIDER in ("anthropic", "openai") and not use_ai:
-                rep.log("IA désactivée par l'administrateur : repérage par heuristique")
-            start, end, note = detect_sermon(segs, duration, video_title or title, rep.log, use_ai)
+            if not use_ai:
+                rep.log("IA désactivée ou non configurée : repérage par heuristique")
+            elif llm["owner"] != AI_SERVER:
+                rep.log(f"IA : clé Anthropic personnelle de « {llm['owner']} »" + (" (choisie par un administrateur)" if ai_chosen else ""))
+            start, end, note = detect_sermon(segs, duration, video_title or title, rep.log, llm, rep.tokens)
         if end - start < 30:
             raise RuntimeError(f"Prédication trop courte détectée ({start:.0f}s → {end:.0f}s)")
         rep._update(sermon_start=start, sermon_end=end, detection_note=note)
@@ -147,7 +167,7 @@ def run_job(job_id: int) -> None:
         extra_cuts, offtopic_note = [], ""
         if offtopic_on:
             rep.step("clean")
-            extra_cuts, offtopic_note, ok = find_offtopic(segs, rep.log)
+            extra_cuts, offtopic_note, ok = find_offtopic(segs, rep.log, llm, rep.tokens)
             if not ok and (pad_b or pad_a):
                 # l'IA n'a pas répondu : on revient exactement aux bornes repérées, sans la marge
                 extra_cuts = [(0.0, pad_b), *(tail_cut or [(total - pad_a, total)])]

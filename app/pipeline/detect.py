@@ -1,6 +1,6 @@
 """Repérage du début et de la fin de la prédication dans le culte complet.
 
-1. Si un LLM est configuré : il lit la transcription horodatée et renvoie les bornes.
+1. Si une IA est disponible pour ce traitement : elle lit la transcription horodatée et renvoie les bornes.
 2. Sinon (ou en cas d'échec) : heuristique basée sur le débit de parole.
    Une prédication = longue zone de parole dense ; la louange chantée a un débit
    de mots bien plus faible (notes tenues) et les annonces sont courtes.
@@ -51,41 +51,29 @@ def _check_llm(r: httpx.Response) -> None:
         msg = r.json()["error"]["message"]
     except Exception:
         msg = r.text[:300]
-    raise RuntimeError(f"API {config.LLM_PROVIDER} {r.status_code} : {msg}")
+    raise RuntimeError(f"API Anthropic {r.status_code} : {msg}")
 
 
-def ask_llm(prompt: str, max_tokens: int = 400) -> str:
-    timeout = httpx.Timeout(180.0)
-    if config.LLM_PROVIDER == "anthropic":
-        r = httpx.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": config.LLM_API_KEY, "anthropic-version": "2023-06-01",
-                     "content-type": "application/json"},
-            json={"model": config.LLM_MODEL or "claude-haiku-4-5-20251001", "max_tokens": max_tokens,
-                  "messages": [{"role": "user", "content": prompt}]},
-            timeout=timeout,
-        )
-        _check_llm(r)
-        return "".join(b.get("text", "") for b in r.json()["content"])
-    # API compatible OpenAI (OpenAI, Groq, OpenRouter, Ollama, LM Studio…)
-    headers = {"content-type": "application/json"}
-    if config.LLM_API_KEY:
-        headers["authorization"] = f"Bearer {config.LLM_API_KEY}"
+def ask_llm(prompt: str, llm: dict, max_tokens: int = 400, on_usage=None) -> str:
+    """`llm` : {key, model} (voir db.ai_for).
+    `on_usage(tokens_entrée, tokens_sortie)` est appelé après chaque réponse (suivi de la consommation)."""
     r = httpx.post(
-        f"{config.LLM_BASE_URL.rstrip('/')}/chat/completions",
-        headers=headers,
-        json={"model": config.LLM_MODEL or "gpt-4o-mini", "temperature": 0,
-              "messages": [{"role": "user", "content": prompt}]},
-        timeout=timeout,
+        "https://api.anthropic.com/v1/messages",
+        headers={"x-api-key": llm["key"], "anthropic-version": "2023-06-01", "content-type": "application/json"},
+        json={"model": llm["model"], "max_tokens": max_tokens, "messages": [{"role": "user", "content": prompt}]},
+        timeout=httpx.Timeout(180.0),
     )
     _check_llm(r)
-    return r.json()["choices"][0]["message"]["content"]
+    data = r.json()
+    if on_usage:
+        on_usage(data.get("usage", {}).get("input_tokens", 0), data.get("usage", {}).get("output_tokens", 0))
+    return "".join(b.get("text", "") for b in data["content"])
 
 
-def detect_with_llm(segments: list[dict], title: str | None) -> tuple[float, float, str]:
+def detect_with_llm(segments: list[dict], title: str | None, llm: dict, on_usage=None) -> tuple[float, float, str]:
     prompt = PROMPT.format(title=f" (titre : « {title} »)" if title else "",
                            chunk=CHUNK, transcript=build_transcript(segments))
-    answer = ask_llm(prompt)
+    answer = ask_llm(prompt, llm, on_usage=on_usage)
     match = re.search(r"\{.*\}", answer, re.S)
     if not match:
         raise ValueError(f"Réponse LLM illisible : {answer[:200]}")
@@ -136,10 +124,12 @@ def detect_heuristic(segments: list[dict], duration: float, coverage: float = 1.
     return start, end, "Heuristique : plus longue zone de parole continue"
 
 
-def detect_sermon(segments: list[dict], duration: float, title: str | None, log, use_ai: bool) -> tuple[float, float, str]:
-    if use_ai:
+def detect_sermon(segments: list[dict], duration: float, title: str | None, log, llm: dict | None,
+                  on_usage=None) -> tuple[float, float, str]:
+    """`llm` : l'IA à utiliser, ou None pour l'heuristique seule."""
+    if llm:
         try:
-            start, end, note = detect_with_llm(segments, title)
+            start, end, note = detect_with_llm(segments, title, llm, on_usage)
             if 0 <= start < end <= duration + 5 and end - start >= 120:
                 return start, min(end + CHUNK, duration), note  # la ligne citée dure CHUNK s : la fin est dedans
             log(f"Bornes IA incohérentes ({start}–{end}), passage à l'heuristique")

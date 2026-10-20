@@ -1,8 +1,10 @@
 # Les variables sont lues depuis .env en local, ou depuis l'onglet « Environment Variables » de Coolify.
 # Une valeur vide = valeur par défaut de l'application (voir .env.example).
+# L'IA (clé Anthropic) ne se règle plus ici : l'administrateur la configure dans l'interface (pastille « IA »).
 x-env: &env
   APP_USER: ${APP_USER:-}
   APP_PASSWORD: ${APP_PASSWORD:-}
+  SECRET_KEY: ${SECRET_KEY:-}
   R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
   R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
   R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
@@ -11,10 +13,6 @@ x-env: &env
   R2_PUBLIC_BASE_URL: ${R2_PUBLIC_BASE_URL:-}
   R2_LINK_EXPIRES: ${R2_LINK_EXPIRES:-}
   R2_ENDPOINT_URL: ${R2_ENDPOINT_URL:-}
-  LLM_PROVIDER: ${LLM_PROVIDER:-}
-  LLM_API_KEY: ${LLM_API_KEY:-}
-  LLM_MODEL: ${LLM_MODEL:-}
-  LLM_BASE_URL: ${LLM_BASE_URL:-}
   WHISPER_MODEL_DETECT: ${WHISPER_MODEL_DETECT:-}
   DETECT_CLIP: ${DETECT_CLIP:-}
   WHISPER_MODEL_EDIT: ${WHISPER_MODEL_EDIT:-}
@@ -71,5 +69,7 @@ services:
       - data:/data
     stop_grace_period: 30s
 
+# Le volume « data » contient la base (comptes, dossiers, réglages, clés chiffrées), secret.key, les podcasts et les modèles Whisper :
+# à sauvegarder. Sans SECRET_KEY, secret.key est la seule clé de chiffrage des clés Anthropic enregistrées.
 volumes:
   data:

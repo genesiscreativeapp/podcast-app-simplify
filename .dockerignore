@@ -1,0 +1,15 @@
+# Hors de l'image : secrets, données du serveur, historique et fichiers de développement
+.env
+.env.*
+!.env.example
+*.bak
+data/
+.git/
+.gitignore
+tests/
+**/__pycache__/
+*.pyc
+.venv/
+.DS_Store
+graphify-out/
+README.md
