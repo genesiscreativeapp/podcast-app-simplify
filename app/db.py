@@ -133,6 +133,9 @@ class Job(Base):
     duration_source: Mapped[float | None] = mapped_column(Float, nullable=True)
     duration_output: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    tokens_in: Mapped[int] = mapped_column(Integer, default=0)   # tokens envoyés à l'IA pendant ce traitement
+    tokens_out: Mapped[int] = mapped_column(Integer, default=0)  # tokens reçus de l'IA
+
     local_mp3: Mapped[str | None] = mapped_column(String(500), nullable=True)
     size_mp3: Mapped[int | None] = mapped_column(Integer, nullable=True)
     r2_key_mp3: Mapped[str | None] = mapped_column(String(800), nullable=True)
@@ -161,6 +164,7 @@ def _init_db() -> None:
         for table, col, sql_type in (("jobs", "intro_id", "INTEGER"), ("folders", "intro_id", "INTEGER"),
                                      ("jobs", "edit_note", "TEXT"), ("jobs", "created_by", "VARCHAR(60)"),
                                      ("users", "is_system", "BOOLEAN DEFAULT 0"), ("users", "max_parallel", "INTEGER DEFAULT 5"),
+                                     ("jobs", "tokens_in", "INTEGER DEFAULT 0"), ("jobs", "tokens_out", "INTEGER DEFAULT 0"),
                                      ("users", "llm_key", "TEXT"), ("users", "ai_on", "BOOLEAN DEFAULT 1"),
                                      ("folders", "created_by", "VARCHAR(60)")):
             cols = {r[1] for r in conn.execute(text(f"PRAGMA table_info({table})"))}

@@ -94,6 +94,7 @@ def job_dict(j: Job, with_log: bool = False, s=None, a: Access | None = None) ->
         "on_r2": bool(j.r2_key_mp3),
         "created_at": j.created_at.isoformat() if j.created_at else None,
         "finished_at": j.finished_at.isoformat() if j.finished_at else None,
+        "tokens_in": j.tokens_in or 0, "tokens_out": j.tokens_out or 0,
         "edit_note": j.edit_note, "created_by": j.created_by, "from_upload": j.youtube_url.startswith(UPLOAD_SCHEME),
         "display_filename": r2sync.display_filename(j), "r2_key": j.r2_key_mp3,
     }

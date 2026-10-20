@@ -41,6 +41,16 @@ class Reporter:
                 job.log = (job.log or "") + line
                 s.commit()
 
+    def tokens(self, n_in: int, n_out: int):
+        """Cumule les tokens de l'IA de ce traitement (l'interface les lit toutes les quelques secondes)."""
+        with SessionLocal() as s:
+            job = s.get(Job, self.job_id)
+            if job:
+                job.tokens_in = (job.tokens_in or 0) + n_in
+                job.tokens_out = (job.tokens_out or 0) + n_out
+                s.commit()
+        self.log(f"IA : {n_in} tokens en entrée, {n_out} en sortie")
+
     def step(self, key: str):
         """Démarre une étape : la barre globale se place au début de sa part."""
         label, lo, _hi = steps.BY_KEY[key]
@@ -74,6 +84,7 @@ def run_job(job_id: int) -> None:
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
     t0 = time.monotonic()
+    rep._update(tokens_in=0, tokens_out=0)  # consommation de CE passage (un « Relancer » repart de zéro ; le journal garde l'historique)
 
     try:
         # 1-2. Téléchargement de l'audio seul (réutilisé tel quel lors d'un « Relancer »)
@@ -112,7 +123,7 @@ def run_job(job_id: int) -> None:
                 rep.log("IA désactivée : repérage par heuristique")
             elif ai_key:
                 rep.log("IA : clé Anthropic personnelle de l'utilisateur")
-            start, end, note = detect_sermon(segs, duration, video_title or title, rep.log, use_ai, ai_key)
+            start, end, note = detect_sermon(segs, duration, video_title or title, rep.log, use_ai, ai_key, rep.tokens)
         if end - start < 30:
             raise RuntimeError(f"Prédication trop courte détectée ({start:.0f}s → {end:.0f}s)")
         rep._update(sermon_start=start, sermon_end=end, detection_note=note)
@@ -149,7 +160,7 @@ def run_job(job_id: int) -> None:
         extra_cuts, offtopic_note = [], ""
         if offtopic_on:
             rep.step("clean")
-            extra_cuts, offtopic_note, ok = find_offtopic(segs, rep.log, ai_key)
+            extra_cuts, offtopic_note, ok = find_offtopic(segs, rep.log, ai_key, rep.tokens)
             if not ok and (pad_b or pad_a):
                 # l'IA n'a pas répondu : on revient exactement aux bornes repérées, sans la marge
                 extra_cuts = [(0.0, pad_b), *(tail_cut or [(total - pad_a, total)])]

@@ -54,8 +54,9 @@ def _check_llm(r: httpx.Response, provider: str) -> None:
     raise RuntimeError(f"API {provider} {r.status_code} : {msg}")
 
 
-def ask_llm(prompt: str, max_tokens: int = 400, key: str | None = None) -> str:
-    """`key` : clé Anthropic personnelle de l'utilisateur ; elle remplace le fournisseur du serveur."""
+def ask_llm(prompt: str, max_tokens: int = 400, key: str | None = None, on_usage=None) -> str:
+    """`key` : clé Anthropic personnelle de l'utilisateur ; elle remplace le fournisseur du serveur.
+    `on_usage(tokens_entrée, tokens_sortie)` est appelé après chaque réponse (suivi de la consommation)."""
     timeout = httpx.Timeout(180.0)
     if key or config.LLM_PROVIDER == "anthropic":
         model = config.LLM_MODEL if config.LLM_PROVIDER == "anthropic" else ""  # LLM_MODEL d'un autre fournisseur ne convient pas
@@ -68,7 +69,10 @@ def ask_llm(prompt: str, max_tokens: int = 400, key: str | None = None) -> str:
             timeout=timeout,
         )
         _check_llm(r, "anthropic")
-        return "".join(b.get("text", "") for b in r.json()["content"])
+        data = r.json()
+        if on_usage:
+            on_usage(data.get("usage", {}).get("input_tokens", 0), data.get("usage", {}).get("output_tokens", 0))
+        return "".join(b.get("text", "") for b in data["content"])
     # API compatible OpenAI (OpenAI, Groq, OpenRouter, Ollama, LM Studio…)
     headers = {"content-type": "application/json"}
     if config.LLM_API_KEY:
@@ -81,13 +85,17 @@ def ask_llm(prompt: str, max_tokens: int = 400, key: str | None = None) -> str:
         timeout=timeout,
     )
     _check_llm(r, config.LLM_PROVIDER)
-    return r.json()["choices"][0]["message"]["content"]
+    data = r.json()
+    if on_usage:  # certaines API compatibles OpenAI n'indiquent pas la consommation
+        on_usage(data.get("usage", {}).get("prompt_tokens", 0), data.get("usage", {}).get("completion_tokens", 0))
+    return data["choices"][0]["message"]["content"]
 
 
-def detect_with_llm(segments: list[dict], title: str | None, key: str | None = None) -> tuple[float, float, str]:
+def detect_with_llm(segments: list[dict], title: str | None, key: str | None = None,
+                    on_usage=None) -> tuple[float, float, str]:
     prompt = PROMPT.format(title=f" (titre : « {title} »)" if title else "",
                            chunk=CHUNK, transcript=build_transcript(segments))
-    answer = ask_llm(prompt, key=key)
+    answer = ask_llm(prompt, key=key, on_usage=on_usage)
     match = re.search(r"\{.*\}", answer, re.S)
     if not match:
         raise ValueError(f"Réponse LLM illisible : {answer[:200]}")
@@ -139,10 +147,10 @@ def detect_heuristic(segments: list[dict], duration: float, coverage: float = 1.
 
 
 def detect_sermon(segments: list[dict], duration: float, title: str | None, log, use_ai: bool,
-                  key: str | None = None) -> tuple[float, float, str]:
+                  key: str | None = None, on_usage=None) -> tuple[float, float, str]:
     if use_ai:
         try:
-            start, end, note = detect_with_llm(segments, title, key)
+            start, end, note = detect_with_llm(segments, title, key, on_usage)
             if 0 <= start < end <= duration + 5 and end - start >= 120:
                 return start, min(end + CHUNK, duration), note  # la ligne citée dure CHUNK s : la fin est dedans
             log(f"Bornes IA incohérentes ({start}–{end}), passage à l'heuristique")

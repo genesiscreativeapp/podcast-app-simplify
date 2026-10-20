@@ -355,6 +355,11 @@ function renderSteps(j, open = false) {
     : `<ul class="steps">${rows}</ul>`;
 }
 
+const fmtTok = (n) => n.toLocaleString("fr-FR");
+// Consommation de l'IA, mise à jour après chaque appel (toutes les quelques secondes pendant un traitement)
+const tokensLine = (j) => (j.tokens_in || j.tokens_out)
+  ? `<div class="tokens" title="Tokens échangés avec l'IA pour ce traitement">${ic("sparkle")} IA : <b>${fmtTok(j.tokens_in + j.tokens_out)}</b> tokens <small>(${fmtTok(j.tokens_in)} envoyés · ${fmtTok(j.tokens_out)} reçus)</small></div>` : "";
+
 function liveBlock(j) {  // rang dans la file, ou barre globale s'il tourne
   if (j.status === "pending") {
     const note = j.step && j.step !== "En attente" ? ` · ${esc(j.step)}` : "";
@@ -363,7 +368,7 @@ function liveBlock(j) {  // rang dans la file, ou barre globale s'il tourne
   if (j.status !== "running") return "";
   const pct = Math.round(j.progress * 100);
   return `<div class="progress"><div style="width:${pct}%"></div></div>
-    <div class="step"><b>Global ${pct}%</b> — ${esc(j.step)}</div>`;
+    <div class="step"><b>Global ${pct}%</b> — ${esc(j.step)}</div>${tokensLine(j)}`;
 }
 
 const isLive = (j) => j.status === "pending" || j.status === "running";
@@ -403,6 +408,7 @@ function activeCard(j) {
     ${head}
       <div class="ac-step"><span class="live"></span><b>${esc(j.step)}</b>${idx >= 0 ? `<small>· étape ${idx + 1}/${vis.length}</small>` : ""}</div>
       <div class="pips">${vis.map((x) => `<i class="${x.state}" style="--w:${x.pct}%" title="${esc(x.label)} — ${x.pct}%"></i>`).join("")}</div>
+      ${tokensLine(j)}
     </div>
     ${actions}</div>`;
 }
@@ -1558,6 +1564,7 @@ async function openDetail(id, silent = false) {
       ${row("Durée de la vidéo", j.duration_source)}` : ""}
       ${row("Durée du podcast", j.duration_output)}
       ${row("Taille", j.size_mp3 ? fmtSize(j.size_mp3) : "")}
+      ${row("Tokens IA", j.tokens_in || j.tokens_out ? `${fmtTok(j.tokens_in + j.tokens_out)} (${fmtTok(j.tokens_in)} envoyés · ${fmtTok(j.tokens_out)} reçus)` : "")}
       ${row("Créé par", esc(j.created_by || ""))}
       ${row("Créé le", fmtDate(j.created_at))}
       ${row("Terminé le", j.finished_at ? fmtDate(j.finished_at) : "")}
