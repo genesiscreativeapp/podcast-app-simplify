@@ -93,7 +93,7 @@ class EnVersion(Base):
     created_by: Mapped[str] = mapped_column(String(60))
     mode: Mapped[str] = mapped_column(String(10), default="review")  # auto : publiée telle quelle ; review : le texte anglais est validé avant la voix
     translator: Mapped[str] = mapped_column(String(10), default="local")  # local (modèle libre) | claude
-    engine: Mapped[str] = mapped_column(String(40), default="chatterbox-nano")  # moteur de voix
+    engine: Mapped[str] = mapped_column(String(40), default="chatterbox-turbo")  # moteur de voix
     ref_start: Mapped[float | None] = mapped_column(Float, nullable=True)  # début de la voix de référence dans le podcast ; None = choisi automatiquement
     status: Mapped[str] = mapped_column(String(20), default="pending")  # pending|running|review|done|error
     step: Mapped[str] = mapped_column(String(200), default="En attente")

@@ -425,6 +425,10 @@ const fmtTok = (n) => n.toLocaleString("fr-FR");
 const tokensLine = (j) => (j.tokens_in || j.tokens_out)
   ? `<div class="tokens" title="Tokens échangés avec l'IA pour ce traitement">${ic("sparkle")} IA : <b>${fmtTok(j.tokens_in + j.tokens_out)}</b> tokens <small>(${fmtTok(j.tokens_in)} envoyés · ${fmtTok(j.tokens_out)} reçus)</small></div>` : "";
 
+// « étape 3/6 » et une pastille par étape : traitement du podcast et version anglaise
+const stepNo = (steps) => { const vis = steps.filter((x) => x.state !== "skipped"), i = vis.findIndex((x) => x.state === "active"); return i >= 0 ? `<small>· étape ${i + 1}/${vis.length}</small>` : ""; };
+const pips = (steps) => `<div class="pips">${steps.filter((x) => x.state !== "skipped").map((x) => `<i class="${x.state}" style="--w:${x.pct}%" title="${esc(x.label)} — ${x.pct}%"></i>`).join("")}</div>`;
+
 function liveBlock(j) {  // rang dans la file, ou barre globale s'il tourne
   if (j.status === "pending") {
     const note = j.step && j.step !== "En attente" ? ` · ${esc(j.step)}` : "";
@@ -469,8 +473,6 @@ function jobActions(j, { detail = true, play = false } = {}) {
 
 // Carte « en cours / en file » de l'accueil : anneau de progression, étape courante, une pastille par étape
 function activeCard(j) {
-  const vis = j.steps.filter((x) => x.state !== "skipped");
-  const idx = vis.findIndex((x) => x.state === "active");
   const sub = `${j.folder_path ? ic("folder") + " " + esc(j.folder_path) : ""}${j.created_by ? ` · par ${esc(j.created_by)}` : ""}`;
   const head = `<div class="ac-main">
       <div class="ac-title">${esc(j.title)} <span class="muted">· ${esc(j.date)}</span></div>
@@ -495,8 +497,8 @@ function activeCard(j) {
   return `<div class="active-card running" data-id="${j.id}">
     <div class="ring" style="--p:${pct}"><b>${pct}<small>%</small></b></div>
     ${head}
-      <div class="ac-step"><span class="live"></span><b>${esc(j.step)}</b>${idx >= 0 ? `<small>· étape ${idx + 1}/${vis.length}</small>` : ""}</div>
-      <div class="pips">${vis.map((x) => `<i class="${x.state}" style="--w:${x.pct}%" title="${esc(x.label)} — ${x.pct}%"></i>`).join("")}</div>
+      <div class="ac-step"><span class="live"></span><b>${esc(j.step)}</b>${stepNo(j.steps)}</div>
+      ${pips(j.steps)}
       ${tokensLine(j)}
     </div>
     ${actions}</div>`;
@@ -518,7 +520,8 @@ function enCard(e) {
   }
   const pct = Math.round(e.progress * 100);
   return `<div class="active-card running" data-en="${e.id}"><div class="ring" style="--p:${pct}"><b>${pct}<small>%</small></b></div>${head}
-    <div class="ac-step"><span class="live"></span><b>${esc(e.step)}</b></div></div><div class="ac-actions"><span class="by"></span>${detail}</div></div>`;
+    <div class="ac-step"><span class="live"></span><b>${esc(e.step)}</b>${stepNo(e.steps)}</div>
+    ${pips(e.steps)}</div><div class="ac-actions"><span class="by"></span>${detail}</div></div>`;
 }
 
 // Ligne compacte (historique, liste des podcasts)
@@ -612,7 +615,7 @@ async function retryDialog(job) {
       <label>Intro<select name="intro_id">${introOptions([["keep", "Ne pas changer"], ["", "Automatique (dossier, sinon par défaut)"]], true, "keep")}</select></label>
       ${state.me.is_admin ? `<label>IA utilisée<select name="ai_user">${aiOptions([["keep", "Ne pas changer"]], "keep")}</select></label>` : ""}
       <div class="row"><label>Durée du podcast<select name="condense_pct">
-          ${[["keep", "Ne pas changer"], ["0", "Durée d'origine"], ["10", "Raccourcir d'environ 10 %"], ["20", "Raccourcir d'environ 20 %"], ["30", "Raccourcir d'environ 30 %"], ["40", "Raccourcir d'environ 40 %"], ["50", "Raccourcir d'environ 50 %"], ["60", "Raccourcir d'environ 60 %"], ["70", "Raccourcir d'environ 70 %"], ["80", "Raccourcir d'environ 80 %"]]
+          ${[["keep", "Ne pas changer"], ["0", "Durée d'origine"], ["10", "Raccourcir d'environ 10 %"], ["20", "Raccourcir d'environ 20 %"], ["30", "Raccourcir d'environ 30 %"], ["40", "Raccourcir d'environ 40 %"], ["45", "Raccourcir d'environ 45 % (maximum)"]]
             .map(([v, l]) => `<option value="${v}" ${v === "keep" ? "selected" : ""}>${l}</option>`).join("")}</select></label>
         <label>Coupes proposées<select name="condense_mode"><option value="keep" selected>Ne pas changer</option>
           <option value="auto">Les appliquer automatiquement</option><option value="review">Me les montrer avant (je valide)</option></select></label></div>
@@ -1847,7 +1850,7 @@ function enBlock(j, admin) {
   else if (e.status === "error") body = `<div class="err-box">${esc(e.error || "Erreur")}</div>`;
   else body = `<div class="player-row"><div data-player="${j.id}" data-lang="en"></div>
       ${e.has_mp3 ? `<a class="btn small" href="/api/jobs/${j.id}/english/file?download=true">${ic("download")} Télécharger MP3 anglais</a>` : ""}</div>`;
-  return `${body}<p class="hint">${esc(meta)}</p>
+  return `${body}${admin ? renderSteps(e) : ""}<p class="hint">${esc(meta)}</p>
     <div class="actions">
       ${e.on_r2 ? `<button class="btn small ghost" data-act="enlink" data-id="${j.id}">${ic("link")} Copier le lien R2</button>` : ""}
       ${can_ && e.status !== "running" ? `<button class="btn small ghost" data-act="english" data-id="${j.id}">${ic("retry")} ${e.status === "done" ? "Régénérer…" : "Relancer…"}</button>` : ""}

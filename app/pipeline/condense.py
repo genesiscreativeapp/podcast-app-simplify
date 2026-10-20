@@ -1,4 +1,4 @@
-"""Condensation d'une prédication : retire des PHRASES ENTIÈRES pour la raccourcir de 10 à 80 %, sans jamais changer l'ordre
+"""Condensation d'une prédication : retire des PHRASES ENTIÈRES pour la raccourcir de 10 à 45 %, sans jamais changer l'ordre
 ni réécrire quoi que ce soit.
 
 - Sans IA : on retire d'abord ce qui n'apporte aucune idée nouvelle (reprises d'une idée déjà dite, formules de remplissage), puis,

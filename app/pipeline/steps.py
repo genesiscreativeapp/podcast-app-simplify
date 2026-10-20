@@ -18,11 +18,22 @@ STEPS = [
 ]
 BY_KEY = {k: (label, lo, hi) for k, label, lo, hi in STEPS}
 
+# Version anglaise (service voicelab) : mêmes parts que les `progress` que voicelab.run_english enregistre
+EN_STEPS = [
+    ("text",      "Texte du podcast français",       0.00, 0.08),
+    ("translate", "Traduction en anglais",           0.08, 0.20),
+    ("ref",       "Voix de référence",               0.20, 0.22),
+    ("voice",     "Voix du prédicateur en anglais",  0.22, 0.90),
+    ("master",    "Volume et fondu de sortie",       0.90, 0.94),
+    ("encode",    "Compression MP3",                 0.94, 0.97),
+    ("upload",    "Envoi vers Cloudflare R2",        0.97, 1.00),
+]
 
-def view(progress: float, status: str, skipped=()) -> list[dict]:
+
+def view(progress: float, status: str, skipped=(), table=STEPS) -> list[dict]:
     """[{key, label, state: pending|active|done|skipped|error, pct: 0-100}]"""
     out = []
-    for key, label, lo, hi in STEPS:
+    for key, label, lo, hi in table:
         if key in skipped:
             state, pct = "skipped", 0
         elif status == "done" or progress >= hi:

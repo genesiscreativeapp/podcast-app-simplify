@@ -38,7 +38,7 @@ mk = lambda **kw: ok(bob.post("/api/jobs", json={"folder_id": fid, "youtube_url"
 assert mk()["condense_pct"] == 0 and next(x for x in mk()["steps"] if x["key"] == "condense")["state"] == "skipped"
 j = mk(condense_pct=20, condense_mode="review")
 assert j["condense_pct"] == 20 and j["condense_mode"] == "review" and next(x for x in j["steps"] if x["key"] == "condense")["state"] == "pending"
-for bad in ({"condense_pct": 15}, {"condense_mode": "peut-etre"}):
+for bad in ({"condense_pct": 15}, {"condense_pct": 50}, {"condense_mode": "peut-etre"}):
     ok(bob.post("/api/jobs", json={"folder_id": fid, "youtube_url": "https://youtu.be/x", "title": "T", "date": "2026-01-01", **bad}), 400)
 jid = j["id"]
 ok(bob.get(f"/api/jobs/{jid}/review"), 400)                          # rien à valider tant que le traitement n'est pas arrivé là

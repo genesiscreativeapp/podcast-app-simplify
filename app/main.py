@@ -86,6 +86,7 @@ def _en_dict(en: EnVersion, full_log: bool = False) -> dict:
             "translator": en.translator, "engine": en.engine, "method": en.method, "error": en.error, "ref_start": en.ref_start,
             "has_mp3": bool(en.local_mp3 and Path(en.local_mp3).exists()), "on_r2": bool(en.r2_key_mp3), "size_mp3": en.size_mp3,
             "duration": en.duration_output, "created_by": en.created_by, "finished_at": en.finished_at.isoformat() if en.finished_at else None,
+            "steps": steps.view(en.progress or 0.0, en.status, [] if (en.r2_key_mp3 if en.status == "done" else storage.enabled()) else ["upload"], steps.EN_STEPS),
             "log": en.log if full_log else None}
 
 
@@ -371,12 +372,12 @@ class RetryIn(BaseModel):
     english_translator: str | None = None
 
 
-CONDENSE_PCT = (0, 10, 20, 30, 40, 50, 60, 70, 80)
+CONDENSE_PCT = (0, 10, 20, 30, 40, 45)
 
 
 def _check_condense(pct: int, mode: str) -> tuple[int, str]:
     if pct not in CONDENSE_PCT:
-        raise HTTPException(400, "Réduction de la durée : 0, 10, 20, 30, 40, 50, 60, 70 ou 80 %")
+        raise HTTPException(400, "Réduction de la durée : 0, 10, 20, 30, 40 ou 45 %")
     if mode not in ("auto", "review"):
         raise HTTPException(400, "Validation des coupes : automatique ou manuelle")
     return pct, mode

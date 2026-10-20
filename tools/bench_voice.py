@@ -6,9 +6,9 @@ Pour chaque moteur demandé, le script mesure le temps de chargement, le temps d
 fichier audio par moteur, à écouter pour juger la ressemblance et le naturel. Mode d'emploi complet : tools/bench_voice.md.
 (La même chose se fait depuis l'application, écran « Banc d'essai voix », avec le service voicelab.)
 
-    python tools/bench_voice.py sermon.mp3 --start 900 --seconds 180 --engines chatterbox-nano,chatterbox
+    python tools/bench_voice.py sermon.mp3 --start 900 --seconds 180 --engines chatterbox-turbo,chatterbox
 
-Moteurs : chatterbox-nano, chatterbox-turbo, chatterbox, openvoice, et « dummy » (faux moteur pour vérifier le banc lui-même).
+Moteurs : chatterbox-turbo, chatterbox, openvoice, et « dummy » (faux moteur pour vérifier le banc lui-même).
 Traduction : par défaut un modèle libre local (--translator local, sans clé ni IA externe : il faut `pip install transformers sentencepiece torch`) ;
 --translator claude utilise Claude avec ANTHROPIC_API_KEY (une clé à vous, jamais écrite sur disque) ; --text-en fichier.txt fournit sa propre traduction.
 """
@@ -55,7 +55,7 @@ def main(argv=None) -> dict:
     ap.add_argument("--seconds", type=float, default=180, help="durée de l'extrait (défaut 180 = 3 minutes)")
     ap.add_argument("--ref-start", type=float, default=5, help="début de la voix de référence DANS l'extrait (défaut 5)")
     ap.add_argument("--ref-seconds", type=float, default=12, help="durée de la voix de référence (défaut 12) : le prédicateur seul, sans musique")
-    ap.add_argument("--engines", default="chatterbox-nano,chatterbox", help="liste séparée par des virgules, parmi : " + ", ".join(ENGINES))
+    ap.add_argument("--engines", default="chatterbox-turbo,chatterbox", help="liste séparée par des virgules, parmi : " + ", ".join(ENGINES))
     ap.add_argument("--text-en", type=Path, help="traduction déjà prête (une phrase par ligne) : ni Whisper ni Claude")
     ap.add_argument("--translator", choices=["local", "claude"], default="local", help="local : modèle libre (défaut) ; claude : IA, avec ANTHROPIC_API_KEY")
     ap.add_argument("--whisper", default="small", help="modèle Whisper pour la transcription (défaut small)")

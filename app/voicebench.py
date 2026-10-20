@@ -32,13 +32,12 @@ Phrases :
 {lines}"""
 # moteurs réellement proposés dans l'interface (id → libellé, remarque)
 REAL_ENGINES = {
-    "chatterbox-nano": ("Chatterbox Nano", "le plus léger, annoncé utilisable sur CPU"),
-    "chatterbox-turbo": ("Chatterbox Turbo", "intermédiaire"),
+    "chatterbox-turbo": ("Chatterbox Turbo", "le plus léger, utilisable sur CPU"),
     "chatterbox": ("Chatterbox complet", "meilleure qualité attendue, plus lent"),
 }
-DEFAULT_ENGINE = "chatterbox-nano"
+DEFAULT_ENGINE = "chatterbox-turbo"
 HINTS = {
-    "chatterbox": "pip install chatterbox-tts   (Python 3.11 conseillé)",
+    "chatterbox": "pip install -U 'chatterbox-tts>=0.1.7'   (Python 3.11 conseillé ; Turbo n'existe pas avant la 0.1.7)",
     "openvoice": "voir tools/bench_voice.md (OpenVoice + MeloTTS, Python 3.9, --openvoice-dir)",
 }
 
@@ -211,7 +210,7 @@ class Chatterbox:
             self.model = ChatterboxTTS.from_pretrained(device="cpu")
         else:
             from chatterbox.tts_turbo import ChatterboxTurboTTS
-            self.model = ChatterboxTurboTTS.from_pretrained(device="cpu", **({"nano": True} if variant == "chatterbox-nano" else {}))
+            self.model = ChatterboxTurboTTS.from_pretrained(device="cpu")
         self.sr = self.model.sr
 
     def say(self, text: str) -> np.ndarray:
@@ -244,7 +243,7 @@ class OpenVoice:
 
 
 ENGINES = {"dummy": lambda ref, work, ov: Dummy(ref, work, ov),
-           "chatterbox-nano": lambda ref, work, ov: Chatterbox("chatterbox-nano", ref, work, ov),
+           "chatterbox-nano": lambda ref, work, ov: Chatterbox("chatterbox-turbo", ref, work, ov),  # ancien nom (n'a jamais existé dans le paquet) : versions anglaises déjà en file
            "chatterbox-turbo": lambda ref, work, ov: Chatterbox("chatterbox-turbo", ref, work, ov),
            "chatterbox": lambda ref, work, ov: Chatterbox("chatterbox", ref, work, ov),
            "openvoice": lambda ref, work, ov: OpenVoice(ref, work, ov)}

@@ -85,7 +85,7 @@ with SessionLocal() as s:
 
 # --- droits, valeurs par défaut, contrôles
 info = ok(bob.get("/api/english"))
-assert info["can_create"] and info["defaults"] == {"translator": "local", "engine": "chatterbox-nano"} and info["claude_available"] is False and info["active"] == []
+assert info["can_create"] and info["defaults"] == {"translator": "local", "engine": "chatterbox-turbo"} and info["claude_available"] is False and info["active"] == []
 assert ok(eve.get("/api/english"))["can_create"] is False
 post = lambda c, jid=1, **kw: c.post(f"/api/jobs/{jid}/english", json=kw)
 ok(post(eve), 403)
@@ -94,7 +94,13 @@ for bad in ({"mode": "peut-etre"}, {"translator": "gpt"}, {"engine": "inconnu"},
     ok(post(bob, **bad), 400)
 ok(post(admin, 99), 404)
 d = ok(post(bob, mode="review"))
-assert d["english"]["status"] == "pending" and d["english"]["mode"] == "review" and d["english"]["translator"] == "local" and d["english"]["engine"] == "chatterbox-nano"
+assert d["english"]["status"] == "pending" and d["english"]["mode"] == "review" and d["english"]["translator"] == "local" and d["english"]["engine"] == "chatterbox-turbo"
+st = d["english"]["steps"]                                                          # les étapes de la version anglaise, comme celles du rendu français
+assert [x["key"] for x in st] == ["text", "translate", "ref", "voice", "master", "encode", "upload"] and {x["state"] for x in st} <= {"pending", "skipped"}
+from app.pipeline import steps as _steps  # noqa: E402
+mid = {x["key"]: x["state"] for x in _steps.view(0.5, "running", [], _steps.EN_STEPS)}
+assert mid == {"text": "done", "translate": "done", "ref": "done", "voice": "active", "master": "pending", "encode": "pending", "upload": "pending"}
+assert [x["state"] for x in _steps.view(0.2, "review", [], _steps.EN_STEPS)][:3] == ["done", "done", "pending"]
 assert ok(bob.get("/api/status"))["english"] == 1 and ok(bob.get("/api/english"))["active"][0]["title"] == "La foi"
 with SessionLocal() as s:
     s.query(EnVersion).update({"status": "running"})
@@ -281,7 +287,7 @@ en_id = prepare("auto", engine="chatterbox")                                    
 voicelab.claim_english()
 voicelab.run_english(en_id)
 e = state(en_id)
-assert e["status"] == "error" and "chatterbox" in e["error"] and "pip install chatterbox-tts" in e["log"]
+assert e["status"] == "error" and "chatterbox" in e["error"] and "chatterbox-tts>=0.1.7" in e["log"]
 
 # ============ fichier, lien, nom sur R2, suppression ============
 en_id = prepare("auto")

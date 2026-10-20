@@ -46,18 +46,18 @@ with SessionLocal() as s:
 assert bob.get("/api/voicelab").status_code == 403 and bob.post("/api/voicelab/runs", json={}).status_code == 403
 v = ok(admin.get("/api/voicelab"))
 assert v["alive"] is False and v["last_seen"] is None and [p["id"] for p in v["podcasts"]] == [1] and v["podcasts"][0]["folder"] == "CULTE"   # ni fichier absent, ni en cours
-assert [e["id"] for e in v["engines"]] == ["chatterbox-nano", "chatterbox-turbo", "chatterbox"] and v["runs"] == []
+assert [e["id"] for e in v["engines"]] == ["chatterbox-turbo", "chatterbox"] and v["runs"] == []
 voicelab.beat()
 assert ok(admin.get("/api/voicelab"))["alive"] is True and ok(admin.get("/api/voicelab"))["last_seen"].endswith("Z")
 
 # --- création d'un essai : tout est contrôlé
-body = {"job_id": 1, "start": 900, "seconds": 180, "ref_start": 5, "engines": ["chatterbox-nano"]}
+body = {"job_id": 1, "start": 900, "seconds": 180, "ref_start": 5, "engines": ["chatterbox-turbo"]}
 post = lambda **kw: admin.post("/api/voicelab/runs", json={**body, **kw})
 for bad in ({"job_id": 2}, {"job_id": 3}, {"job_id": 99}, {"seconds": 10}, {"seconds": 900}, {"start": -1}, {"start": 1790}, {"ref_start": 175},
             {"engines": []}, {"engines": ["dummy", "inconnu"]}, {"text_en": "x" * 20001}, {"translator": "gpt"}):
     ok(post(**bad), 400)
-r = ok(post(engines=["chatterbox", "chatterbox", "chatterbox-nano"]))
-assert r["status"] == "pending" and r["engines"] == ["chatterbox", "chatterbox-nano"] and r["seconds"] == 180 and r["title"] == "Sermon"
+r = ok(post(engines=["chatterbox", "chatterbox", "chatterbox-turbo"]))
+assert r["status"] == "pending" and r["engines"] == ["chatterbox", "chatterbox-turbo"] and r["seconds"] == 180 and r["title"] == "Sermon"
 assert r["translator"] == "local"                                               # par défaut : le modèle libre local, sans IA externe
 assert ok(post(translator="claude"))["translator"] == "claude"
 assert ok(post(start=1700))["seconds"] == 100                                  # l'extrait est raccourci pour ne pas dépasser le podcast

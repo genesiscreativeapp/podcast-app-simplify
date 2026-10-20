@@ -138,7 +138,7 @@ new_job(6, 0, "auto", "review")
 R.run_job(6)
 with SessionLocal() as s:
     en = s.query(EnVersion).filter(EnVersion.job_id == 6).one()
-    assert (en.status, en.mode, en.created_by, en.translator, en.engine) == ("pending", "review", "u", "local", "chatterbox-nano") and en.text_json is None
+    assert (en.status, en.mode, en.created_by, en.translator, en.engine) == ("pending", "review", "u", "local", "chatterbox-turbo") and en.text_json is None
 assert job(6).status == "done" and "Version anglaise mise en file" in job(6).log
 new_job(7, 0, "auto", "auto", "claude")                                             # traducteur choisi à la création : repris par la file
 R.run_job(7)

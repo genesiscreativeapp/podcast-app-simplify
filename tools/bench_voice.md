@@ -17,7 +17,7 @@ moteur demandé avec la voix de référence prise dans l'extrait. Il affiche les
   Vous pouvez aussi fournir votre traduction (une phrase par ligne) avec `--text-en en.txt`.
 - Quelques Go d'espace disque : PyTorch et les modèles se téléchargent à la première utilisation.
 
-## Chatterbox (à essayer en premier : MIT, la variante « nano » est annoncée utilisable sur CPU)
+## Chatterbox (à essayer en premier : MIT, la variante Turbo est la plus légère)
 
 Dans un conteneur jetable, sur le serveur, depuis le dossier du projet (le podcast copié à côté, ici `sermon.mp3`) :
 
@@ -32,7 +32,7 @@ apt-get update && apt-get install -y ffmpeg libsndfile1 git build-essential
 pip install faster-whisper httpx soundfile numpy transformers sentencepiece
 pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu   # évite la version CUDA, très lourde
 pip install chatterbox-tts
-python tools/bench_voice.py sermon.mp3 --start 900 --seconds 180 --engines chatterbox-nano,chatterbox-turbo,chatterbox
+python tools/bench_voice.py sermon.mp3 --start 900 --seconds 180 --engines chatterbox-turbo,chatterbox
 ```
 
 `--start 900` : l'extrait commence à 15 minutes (après l'intro du podcast). Si la voix de référence tombe sur un silence ou un

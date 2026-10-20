@@ -11,4 +11,4 @@ transformers
 sentencepiece
 torch
 torchaudio
-chatterbox-tts
+chatterbox-tts>=0.1.7  # Turbo (chatterbox.tts_turbo) n'existe pas avant
