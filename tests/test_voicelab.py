@@ -165,4 +165,27 @@ ok(admin.delete("/api/voicelab/runs/1"), 400)
 assert voicelab.mark_interrupted() == 1 and "redémarrage" in ok(admin.get("/api/voicelab/runs/1"))["error"]
 ok(admin.delete(f"/api/voicelab/runs/{dummy_id}"))
 assert not (config.DATA_DIR / "bench" / str(dummy_id)).exists() and admin.get(f"/api/voicelab/runs/{dummy_id}").status_code == 404
+# chargement d'un moteur : le journal dit où en est le téléchargement des modèles
+import time  # noqa: E402
+
+os.environ["HF_HOME"] = str(Path(os.environ["DATA_DIR"]) / "hf")
+(Path(os.environ["HF_HOME"]) / "hub").mkdir(parents=True)
+msgs = []
+with voicelab._watch_models(msgs.append, "Chargement", every=0.05):
+    (Path(os.environ["HF_HOME"]) / "hub" / "model.bin").write_bytes(b"x" * 3_000_000)
+    time.sleep(0.3)
+assert msgs and "Go" in msgs[0] and "+3 Mo" in msgs[0] and any("rien de nouveau" in m for m in msgs[1:]), msgs
+# sans GPU, torch.load ramène tout sur le processeur (fichiers Chatterbox enregistrés sur CUDA) ; avec un GPU ou un map_location explicite, rien ne change
+from types import SimpleNamespace  # noqa: E402
+
+seen = []
+fake = SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False), device=lambda n: f"dev:{n}", load=lambda *a, **k: seen.append(k) or "obj")
+vb._force_cpu_load(fake)
+vb._force_cpu_load(fake)
+assert fake.load("f") == "obj" and fake.load("f", map_location="cuda") == "obj" and fake.load("f", "cuda") == "obj"
+assert seen == [{"map_location": "dev:cpu"}, {"map_location": "cuda"}, {}], seen
+gpu = SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: True), load=lambda *a, **k: None)
+before = gpu.load
+vb._force_cpu_load(gpu)
+assert gpu.load is before
 print("ok")

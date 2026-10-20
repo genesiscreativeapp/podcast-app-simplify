@@ -407,7 +407,7 @@ $("miniPlayer").addEventListener("click", (e) => {
 const loadingLine = (box) => (box.innerHTML = '<div class="loading-line"><span class="spinner"></span> Chargement…</div>');
 
 const STEP_ICON = { done: "✓", active: "●", pending: "○", skipped: "–", error: "!" };
-function renderSteps(j, open = false) {
+function renderSteps(j, open = false, key = "steps") {
   const rows = j.steps.map((s, i) => `
     <li class="st ${s.state}">
       <span class="st-icon">${STEP_ICON[s.state]}</span>
@@ -416,7 +416,7 @@ function renderSteps(j, open = false) {
       <span class="st-pct">${s.state === "skipped" ? "ignorée" : s.pct + "%"}</span>
     </li>`).join("");
   return j.status === "done" && !open
-    ? `<details class="steps"><summary>Détail des étapes</summary><ul>${rows}</ul></details>`
+    ? `<details class="steps" data-keep="${key}"><summary>Détail des étapes</summary><ul>${rows}</ul></details>`
     : `<ul class="steps">${rows}</ul>`;
 }
 
@@ -1850,13 +1850,13 @@ function enBlock(j, admin) {
   else if (e.status === "error") body = `<div class="err-box">${esc(e.error || "Erreur")}</div>`;
   else body = `<div class="player-row"><div data-player="${j.id}" data-lang="en"></div>
       ${e.has_mp3 ? `<a class="btn small" href="/api/jobs/${j.id}/english/file?download=true">${ic("download")} Télécharger MP3 anglais</a>` : ""}</div>`;
-  return `${body}${admin ? renderSteps(e) : ""}<p class="hint">${esc(meta)}</p>
+  return `${body}${admin ? renderSteps(e, false, "ensteps") : ""}<p class="hint">${esc(meta)}</p>
     <div class="actions">
       ${e.on_r2 ? `<button class="btn small ghost" data-act="enlink" data-id="${j.id}">${ic("link")} Copier le lien R2</button>` : ""}
       ${can_ && e.status !== "running" ? `<button class="btn small ghost" data-act="english" data-id="${j.id}">${ic("retry")} ${e.status === "done" ? "Régénérer…" : "Relancer…"}</button>` : ""}
       ${admin && e.status !== "running" ? `<button class="btn small ghost danger" data-act="endelete" data-id="${j.id}">${ic("trash")} Supprimer</button>` : ""}
     </div>
-    ${admin && j.english_log ? `<details class="log"><summary>Journal de la version anglaise</summary><pre class="detail-log">${esc(j.english_log)}</pre></details>` : ""}`;
+    ${admin && j.english_log ? `<details class="log" data-keep="enlog"><summary>Journal de la version anglaise</summary><pre class="detail-log">${esc(j.english_log)}</pre></details>` : ""}`;
 }
 
 $("detailBody").addEventListener("click", (e) => {
@@ -1873,7 +1873,8 @@ async function openDetail(id, silent = false) {
   state.detail = j;
   const dlg = $("detailDialog");
   if (!silent && !dlg.open) state.detailTab = "podcast";  // une nouvelle ouverture repart du premier onglet
-  const logOpen = dlg.querySelector("details.log")?.open;
+  // le rafraîchissement refait toute la fenêtre : on garde ouvert ce que l'utilisateur a ouvert (journaux, étapes) et la position de lecture
+  const kept = dlg.open ? Object.fromEntries([...dlg.querySelectorAll("details[data-keep]")].map((d) => [d.dataset.keep, { open: d.open, top: d.querySelector("pre")?.scrollTop || 0 }])) : {};
   const keepAudio = { fr: dlg.querySelector('audio[data-lang="fr"]'), en: dlg.querySelector('audio[data-lang="en"]') };  // un son en cours n'est pas coupé
   $("detailTitle").textContent = j.title;
   const admin = state.me.is_admin;  // les autres comptes ne voient ni les étapes, ni le repérage, ni le journal
@@ -1922,13 +1923,20 @@ async function openDetail(id, silent = false) {
       ${row("Terminé le", j.finished_at ? fmtDate(j.finished_at) : "")}
     </dl>`)}
     ${admin ? pane("steps", `${renderSteps(j, true)}
-      <details class="log" ${logOpen ? "open" : ""}><summary>Journal complet</summary>
+      <details class="log" data-keep="log"><summary>Journal complet</summary>
         <pre class="detail-log">${esc(j.log || "(vide)")}</pre></details>`) : ""}
     <div class="dialog-foot">
       ${j.status === "done" && j.has_mp3 && can("jobs.trim") && editable(j) ? `<button class="btn ghost" data-act="trim" data-id="${j.id}">${ic("scissors")} Rogner</button>` : ""}
       ${(j.status === "done" || j.status === "error") && can("jobs.create") && editable(j) ? `<button class="btn ghost" data-act="retry" data-id="${j.id}">Relancer</button>` : ""}
       ${j.status !== "running" && can("jobs.delete") && editable(j) ? `<button class="btn ghost danger" data-act="delete" data-id="${j.id}">Supprimer</button>` : ""}
     </div>`;
+  $("detailBody").querySelectorAll("details[data-keep]").forEach((d) => {
+    const k = kept[d.dataset.keep];
+    if (!k) return;
+    d.open = k.open;
+    const pre = d.querySelector("pre");
+    if (pre) pre.scrollTop = k.top;
+  });
   $("detailBody").querySelectorAll("[data-player]").forEach((slot) => {
     const lang = slot.dataset.lang || "fr", kept = keepAudio[lang];
     slot.replaceWith(kept && kept.dataset.job == j.id ? kept : makePlayer(j.id, false, lang));

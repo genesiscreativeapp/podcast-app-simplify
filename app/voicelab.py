@@ -12,6 +12,7 @@ import signal
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -40,6 +41,30 @@ def _heartbeat() -> None:  # pendant un long calcul aussi : l'écran sait que le
         except Exception:
             log.exception("battement de cœur")
         time.sleep(5)
+
+
+def _models_size() -> int:
+    root = Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface")
+    return sum(f.stat().st_size for f in root.rglob("*") if f.is_file() and not f.is_symlink()) if root.exists() else 0
+
+
+@contextmanager
+def _watch_models(say, what: str, every: float = 30.0):
+    """Le premier chargement d'un moteur télécharge plusieurs Go sans rien afficher : le journal dit si ça avance."""
+    stop, t0, last = threading.Event(), time.monotonic(), [_models_size()]
+
+    def loop():
+        while not stop.wait(every):
+            size = _models_size()
+            grew = f" (+{(size - last[0]) / 1e6:.0f} Mo)" if size != last[0] else " — rien de nouveau (téléchargement terminé ou bloqué : voir les journaux du service)"
+            say(f"{what} depuis {int(time.monotonic() - t0)} s : modèles en cache {size / 1e9:.2f} Go{grew}")
+            last[0] = size
+
+    threading.Thread(target=loop, daemon=True).start()
+    try:
+        yield
+    finally:
+        stop.set()
 
 
 def _set(run_id: int, **fields) -> None:
@@ -170,7 +195,8 @@ def run_english(en_id: int) -> None:
             step("Choix de la voix de référence", 0.21)
             _en_say(en_id, f"Voix de référence prise à {vb.pick_reference(e['mp3'], ref, e['ref_start']):.0f} s du podcast")
         step(f"Chargement du moteur de voix ({e['engine']})", 0.22)
-        engine = vb.load_engine(e["engine"], ref, work)
+        with _watch_models(lambda m: _en_say(en_id, m), "Chargement du moteur"):
+            engine = vb.load_engine(e["engine"], ref, work)
         todo = [i for i in range(len(parts)) if not (work / f"part_{i:04d}.wav").exists()]
         if len(todo) < len(parts):
             _en_say(en_id, f"Reprise : {len(parts) - len(todo)} morceau(x) sur {len(parts)} déjà synthétisé(s)")

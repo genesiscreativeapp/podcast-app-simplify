@@ -202,15 +202,32 @@ class Dummy:
         return 0.1 * np.sin(2 * np.pi * 220 * np.arange(int(0.06 * len(text) * self.sr)) / self.sr)
 
 
+def _force_cpu_load(torch) -> None:
+    """Certains fichiers de Chatterbox ont été enregistrés sur carte graphique : sans GPU, torch.load doit tout ramener sur le processeur
+    (« Attempting to deserialize object on a CUDA device… »). Sans effet si un GPU existe ou si map_location est déjà donné."""
+    if torch.cuda.is_available() or getattr(torch.load, "_cpu_patched", False):
+        return
+    orig = torch.load
+
+    def load(*a, **k):
+        if len(a) < 2 and k.get("map_location") is None:
+            k["map_location"] = torch.device("cpu")
+        return orig(*a, **k)
+
+    load._cpu_patched = True
+    torch.load = load
+
+
 class Chatterbox:
     def __init__(self, variant, ref, work, openvoice_dir):
         self.ref = str(ref)
         if variant == "chatterbox":
-            from chatterbox.tts import ChatterboxTTS
-            self.model = ChatterboxTTS.from_pretrained(device="cpu")
+            from chatterbox.tts import ChatterboxTTS as Model
         else:
-            from chatterbox.tts_turbo import ChatterboxTurboTTS
-            self.model = ChatterboxTurboTTS.from_pretrained(device="cpu")
+            from chatterbox.tts_turbo import ChatterboxTurboTTS as Model
+        import torch
+        _force_cpu_load(torch)
+        self.model = Model.from_pretrained(device="cpu")
         self.sr = self.model.sr
 
     def say(self, text: str) -> np.ndarray:
