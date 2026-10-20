@@ -107,7 +107,7 @@ def job_dict(j: Job, with_log: bool = False, s=None, a: Access | None = None) ->
         "on_r2": bool(j.r2_key_mp3),
         "created_at": j.created_at.isoformat() if j.created_at else None,
         "finished_at": j.finished_at.isoformat() if j.finished_at else None,
-        "english_mode": j.english_mode or "", "ai_user": j.ai_user, "condense_pct": j.condense_pct or 0, "condense_mode": j.condense_mode or "auto",
+        "english_mode": j.english_mode or "", "english_translator": j.english_translator or "", "ai_user": j.ai_user, "condense_pct": j.condense_pct or 0, "condense_mode": j.condense_mode or "auto",
         "tokens_in": j.tokens_in or 0, "tokens_out": j.tokens_out or 0,
         "edit_note": j.edit_note, "created_by": j.created_by, "from_upload": j.youtube_url.startswith(UPLOAD_SCHEME),
         "display_filename": r2sync.display_filename(j), "r2_key": j.r2_key_mp3,
@@ -357,6 +357,7 @@ class JobIn(BaseModel):
     condense_pct: int = 0  # part de la prédication à retirer (redites, formules creuses) : 0, 10, 20 ou 30
     condense_mode: str = "auto"  # « auto » : appliqué directement ; « review » : attend la validation de l'utilisateur
     english: str = ""  # version anglaise : "" (non), « auto » (publiée telle quelle) ou « review » (le texte anglais est validé d'abord)
+    english_translator: str = ""  # traduction : "" (réglage de l'administrateur), « local » (modèle libre) ou « claude » (notre IA configurée)
 
 
 class RetryIn(BaseModel):
@@ -367,6 +368,7 @@ class RetryIn(BaseModel):
     condense_pct: int | None = None  # pris en compte seulement s'ils sont envoyés
     condense_mode: str | None = None
     english: str | None = None
+    english_translator: str | None = None
 
 
 CONDENSE_PCT = (0, 10, 20, 30)
@@ -386,6 +388,15 @@ def _check_english(a: Access, mode: str) -> str:
     if mode and not has_perm(a.user, "english.create"):
         raise HTTPException(403, "Vous n'avez pas la permission de générer la version anglaise")
     return mode
+
+
+def _check_translator(s, a: Access, value: str) -> str:
+    """Traducteur choisi pour la version anglaise : le modèle local, ou notre IA configurée (si elle est disponible pour cet utilisateur)."""
+    if value not in ("", *english.TRANSLATORS):
+        raise HTTPException(400, "Traducteur inconnu")
+    if value == "claude" and ai_for(s, a.user.username) is None:
+        raise HTTPException(400, "Notre IA n'est pas disponible pour vous : choisissez le modèle local, ou configurez une IA")
+    return value
 
 
 def _check_ai_user(s, a: Access, value: str | None) -> str | None:
@@ -501,10 +512,10 @@ def _staged(upload_id: str, user: User) -> tuple[Path, dict]:
 
 
 def _job_from_staged(s, a: Access, user: User, upload_id: str, folder_id: int, title: str, day: str,
-                     start, end, intro, ai_user=None, condense=(0, "auto"), english_mode="") -> Job:
+                     start, end, intro, ai_user=None, condense=(0, "auto"), english_mode="", english_translator="") -> Job:
     """Crée le traitement et lui donne le fichier en attente comme audio source (même suite que pour un lien)."""
     d, meta = _staged(upload_id, user)
-    job = Job(folder_id=folder_id, intro_id=intro, ai_user=ai_user, condense_pct=condense[0], condense_mode=condense[1], english_mode=english_mode, created_by=user.username,
+    job = Job(folder_id=folder_id, intro_id=intro, ai_user=ai_user, condense_pct=condense[0], condense_mode=condense[1], english_mode=english_mode, english_translator=english_translator, created_by=user.username,
               youtube_url=f"{UPLOAD_SCHEME}{meta['name']}", video_title=Path(meta["name"]).stem, title=title, date=day,
               filename=f"{slugify(title)}_{day}", start_override=start, end_override=end)
     s.add(job)
@@ -559,16 +570,17 @@ def create_job(body: JobIn, request: Request, s=Depends(db), a: Access = Depends
     ai_user = _check_ai_user(s, a, body.ai_user)
     condense = _check_condense(body.condense_pct, body.condense_mode)
     english_mode = _check_english(a, body.english)
+    english_translator = _check_translator(s, a, body.english_translator) if english_mode else ""
     if body.upload_id:
         title, day, start, end = _job_fields(body.title, body.date, body.start, body.end, body.intro_id, s)
-        job = _job_from_staged(s, a, request.state.user, body.upload_id, body.folder_id, title, day, start, end, body.intro_id, ai_user, condense, english_mode)
+        job = _job_from_staged(s, a, request.state.user, body.upload_id, body.folder_id, title, day, start, end, body.intro_id, ai_user, condense, english_mode, english_translator)
         return job_dict(job, s=s, a=a)
     url = body.youtube_url.strip()
     if not url.startswith(("http://", "https://")):
         raise HTTPException(400, "Lien YouTube invalide")
     title, day, start, end = _job_fields(body.title, body.date, body.start, body.end, body.intro_id, s)
     job = Job(folder_id=body.folder_id, intro_id=body.intro_id, ai_user=ai_user, condense_pct=condense[0], condense_mode=condense[1], english_mode=english_mode,
-              created_by=request.state.user.username, youtube_url=url, title=title, date=day,
+              english_translator=english_translator, created_by=request.state.user.username, youtube_url=url, title=title, date=day,
               filename=f"{slugify(title)}_{day}", start_override=start, end_override=end)
     s.add(job)
     s.commit()
@@ -578,13 +590,14 @@ def create_job(body: JobIn, request: Request, s=Depends(db), a: Access = Depends
 @app.post("/api/jobs/upload", dependencies=[Depends(auth.need("jobs.create"))])
 def create_job_from_file(request: Request, file: UploadFile = File(...), folder_id: int = Form(...), title: str = Form(""),
                          date: str = Form(""), start: str = Form(""), end: str = Form(""), intro_id: str = Form(""), ai_user: str = Form(""),
-                         condense_pct: int = Form(0), condense_mode: str = Form("auto"), english: str = Form(""),
+                         condense_pct: int = Form(0), condense_mode: str = Form("auto"), english: str = Form(""), english_translator: str = Form(""),
                          s=Depends(db), a: Access = Depends(acl)):
     """Traitement individuel à partir d'un fichier audio/vidéo envoyé (au lieu d'un lien YouTube) : envoi puis rattachement."""
     a.need_folder(folder_id)
     ai_user = _check_ai_user(s, a, ai_user)
     condense = _check_condense(condense_pct, condense_mode)
     english_mode = _check_english(a, english)
+    english_translator = _check_translator(s, a, english_translator) if english_mode else ""
     try:
         intro = None if intro_id == "" else int(intro_id)
     except ValueError:
@@ -594,7 +607,7 @@ def create_job_from_file(request: Request, file: UploadFile = File(...), folder_
     user = request.state.user
     meta = _stage_file(file, user.username)
     try:
-        job = _job_from_staged(s, a, user, meta["id"], folder_id, title, day, start_s, end_s, intro, ai_user, condense, english_mode)
+        job = _job_from_staged(s, a, user, meta["id"], folder_id, title, day, start_s, end_s, intro, ai_user, condense, english_mode, english_translator)
     except BaseException:
         shutil.rmtree(config.STAGING_DIR / meta["id"], ignore_errors=True)
         raise
@@ -872,6 +885,8 @@ def retry_job(job_id: int, body: RetryIn, s=Depends(db), a: Access = Depends(acl
                                                               job.condense_mode if body.condense_mode is None else body.condense_mode)
     if body.english is not None:
         job.english_mode = _check_english(a, body.english)
+    if body.english_translator is not None:
+        job.english_translator = _check_translator(s, a, body.english_translator)
     job.review_json, job.review_ok = None, False  # une relance repart de l'analyse : l'ancienne proposition de coupes ne vaut plus
     job.status, job.step, job.progress, job.error = "pending", "En attente", 0.0, None
     job.updated_at = datetime.utcnow()  # repart en fin de file

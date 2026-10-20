@@ -285,6 +285,10 @@
                   </select>
                   <span class="hint">Traduction et voix du prédicateur, calculées après le podcast par le service de voix : cela peut prendre plusieurs heures.</span>
                 </label>
+                <label class="full" id="jobTrBox" hidden>Traduction de la version anglaise
+                  <select name="english_translator" id="jobTr"></select>
+                  <span class="hint">Le modèle libre local reste le choix par défaut ; notre IA configurée traduit mieux le ton oral, et le modèle local prend le relais si elle ne répond pas.</span>
+                </label>
                 <label class="full" id="jobModeBox" hidden>Coupes proposées
                   <select name="condense_mode">
                     <option value="auto">Les appliquer automatiquement</option>
@@ -332,6 +336,9 @@
                     <option value="review">Oui — je valide le texte anglais avant la voix</option>
                     <option value="auto">Oui — publier automatiquement</option>
                   </select>
+                </label>
+                <label id="batchTrBox" hidden>Traduction de la version anglaise
+                  <select id="batchTr"></select>
                 </label>
                 <label id="batchModeBox" hidden>Coupes proposées
                   <select id="batchMode">

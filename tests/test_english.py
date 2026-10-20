@@ -119,6 +119,23 @@ ok(admin.put("/api/users/3/folders", json={"folder_ids": [fid]}))
 ok(mk(eve, english="auto"), 403)                                                           # eve voit le dossier mais n'a pas la permission
 assert ok(mk(eve))["english_mode"] == ""
 
+# --- choix du traducteur à la création : modèle local, ou notre IA configurée (seulement si elle est disponible)
+assert ok(mk(bob, english="auto", english_translator="local"))["english_translator"] == "local" and ok(mk(bob, english="auto"))["english_translator"] == ""
+ok(mk(bob, english="auto", english_translator="gpt"), 400)
+ok(mk(bob, english="auto", english_translator="claude"), 400)                               # aucune IA configurée : refusé plutôt que remplacé en silence
+assert ok(mk(bob, english_translator="claude"))["english_translator"] == ""                 # sans version anglaise demandée : sans effet
+with SessionLocal() as s:
+    s.merge(Setting(key="llm_key", value=vault.encrypt("sk-ant-" + "s" * 30)))
+    s.commit()
+assert ok(mk(bob, english="review", english_translator="claude"))["english_translator"] == "claude"
+bj = ok(mk(bob, english="auto"))["id"]
+assert ok(bob.post(f"/api/jobs/{bj}/retry", json={"english_translator": "local"}))["english_translator"] == "local"
+ok(bob.post(f"/api/jobs/{bj}/retry", json={"english_translator": "gpt"}), 400)
+with SessionLocal() as s:
+    s.query(Setting).filter(Setting.key == "llm_key").delete()
+    s.commit()
+ok(bob.post(f"/api/jobs/{bj}/retry", json={"english_translator": "claude"}), 400)
+
 # ============ le service ============
 shutil.copy  # (les faux ci-dessous évitent ffmpeg et les modèles)
 voicelab.audio.finalize = lambda body, out, intro=None, xfade=0.6, on_progress=None: shutil.copy(body, out)

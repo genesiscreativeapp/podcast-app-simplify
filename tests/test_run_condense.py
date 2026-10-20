@@ -45,10 +45,10 @@ with SessionLocal() as s:
     s.commit()
 
 
-def new_job(i, pct, mode, english=""):
+def new_job(i, pct, mode, english="", translator=""):
     with SessionLocal() as s:
         s.add(Job(id=i, folder_id=1, youtube_url="upload://x.wav", title=f"t{i}", date="2026-01-01", filename=f"t{i}",
-                  start_override=0.0, end_override=TOTAL, condense_pct=pct, condense_mode=mode, english_mode=english, created_by="u"))
+                  start_override=0.0, end_override=TOTAL, condense_pct=pct, condense_mode=mode, english_mode=english, english_translator=translator, created_by="u"))
         s.commit()
     cache = config.CACHE_DIR / str(i)
     cache.mkdir(parents=True)
@@ -138,4 +138,9 @@ with SessionLocal() as s:
     en = s.query(EnVersion).filter(EnVersion.job_id == 6).one()
     assert (en.status, en.mode, en.created_by, en.translator, en.engine) == ("pending", "review", "u", "local", "chatterbox-nano") and en.text_json is None
 assert job(6).status == "done" and "Version anglaise mise en file" in job(6).log
+new_job(7, 0, "auto", "auto", "claude")                                             # traducteur choisi à la création : repris par la file
+R.run_job(7)
+with SessionLocal() as s:
+    en = s.query(EnVersion).filter(EnVersion.job_id == 7).one()
+    assert (en.mode, en.translator) == ("auto", "claude")
 print("ok")

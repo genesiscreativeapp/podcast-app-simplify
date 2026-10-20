@@ -201,7 +201,7 @@ def run_job(job_id: int) -> None:
         jb = SimpleNamespace(url=job.youtube_url, title=job.title, known_title=job.video_title, ai_chosen=job.ai_user,
                              start_ov=job.start_override, end_ov=job.end_override, pct=job.condense_pct or 0,
                              mode=job.condense_mode or "auto", review_ok=bool(job.review_ok), review_json=job.review_json,
-                             english_mode=job.english_mode or "")
+                             english_mode=job.english_mode or "", english_translator=job.english_translator or "")
         date = job.date
 
     rep = Reporter(job_id, llm and llm["owner"])
@@ -307,7 +307,7 @@ def run_job(job_id: int) -> None:
         if jb.english_mode:  # version anglaise demandée avec le traitement : elle part en file, le service de voix la calculera
             try:
                 with SessionLocal() as s2:
-                    english.queue(s2, s2.get(Job, job_id), jb.english_mode, s2.get(Job, job_id).created_by)
+                    english.queue(s2, s2.get(Job, job_id), jb.english_mode, s2.get(Job, job_id).created_by, jb.english_translator or None)
                 rep.log("Version anglaise mise en file d'attente")
             except Exception:  # le podcast français est terminé : un échec ici ne doit pas le marquer en erreur
                 rep.log("Version anglaise non mise en file : " + traceback.format_exc().splitlines()[-1])

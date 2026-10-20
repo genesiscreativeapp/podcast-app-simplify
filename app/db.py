@@ -205,6 +205,7 @@ class Job(Base):
     review_ok: Mapped[bool] = mapped_column(Boolean, default=False)  # coupes validées : le traitement reprend où il s'était arrêté
     # Version anglaise : demandée à la création (« auto » : publiée telle quelle ; « review » : l'utilisateur valide d'abord le texte)
     english_mode: Mapped[str] = mapped_column(String(10), default="")
+    english_translator: Mapped[str] = mapped_column(String(10), default="")  # "" : réglage de l'administrateur ; local ; claude (notre IA configurée)
     transcript_json: Mapped[str | None] = mapped_column(Text, nullable=True)  # texte final du podcast, phrase par phrase (JSON)
     tokens_in: Mapped[int] = mapped_column(Integer, default=0)   # tokens envoyés à l'IA pendant ce traitement
     tokens_out: Mapped[int] = mapped_column(Integer, default=0)  # tokens reçus de l'IA
@@ -241,7 +242,7 @@ def _init_db() -> None:
                                      ("users", "is_system", "BOOLEAN DEFAULT 0"), ("users", "max_parallel", "INTEGER DEFAULT 5"),
                                      ("jobs", "deleted_at", "DATETIME"), ("jobs", "deleted_by", "VARCHAR(60)"),
                                      ("folders", "deleted_at", "DATETIME"), ("folders", "deleted_by", "VARCHAR(60)"),
-                                     ("jobs", "ai_user", "VARCHAR(60)"), ("voice_bench", "translator", "VARCHAR(10) DEFAULT 'local'"), ("jobs", "english_mode", "VARCHAR(10) DEFAULT ''"), ("jobs", "transcript_json", "TEXT"), ("jobs", "condense_pct", "INTEGER DEFAULT 0"),
+                                     ("jobs", "ai_user", "VARCHAR(60)"), ("voice_bench", "translator", "VARCHAR(10) DEFAULT 'local'"), ("jobs", "english_mode", "VARCHAR(10) DEFAULT ''"), ("jobs", "english_translator", "VARCHAR(10) DEFAULT ''"), ("jobs", "transcript_json", "TEXT"), ("jobs", "condense_pct", "INTEGER DEFAULT 0"),
                                      ("jobs", "condense_mode", "VARCHAR(10) DEFAULT 'auto'"), ("jobs", "review_json", "TEXT"),
                                      ("jobs", "review_ok", "BOOLEAN DEFAULT 0"), ("jobs", "tokens_in", "INTEGER DEFAULT 0"), ("jobs", "tokens_out", "INTEGER DEFAULT 0"),
                                      ("users", "llm_key", "TEXT"), ("users", "ai_on", "BOOLEAN DEFAULT 1"),

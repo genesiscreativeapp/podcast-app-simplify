@@ -9,7 +9,7 @@ from .db import EnVersion, Job, Setting, setting
 from .utils import slugify
 from .voicebench import DEFAULT_ENGINE, REAL_ENGINES
 
-TRANSLATORS = {"local": "Modèle libre local (gratuit, sans IA externe)", "claude": "Claude (meilleure qualité, si une IA est disponible)"}
+TRANSLATORS = {"local": "Modèle libre local (gratuit, sans IA externe)", "claude": "Notre IA configurée (Claude) : meilleure qualité, si elle est disponible"}
 EN_DIR = config.DATA_DIR / "en"  # travail en cours : morceaux audio déjà synthétisés (une reprise ne refait pas ce qui est fait)
 
 

@@ -558,7 +558,8 @@ async function retryDialog(job) {
         <label>Coupes proposées<select name="condense_mode"><option value="keep" selected>Ne pas changer</option>
           <option value="auto">Les appliquer automatiquement</option><option value="review">Me les montrer avant (je valide)</option></select></label></div>
       ${can("english.create") ? `<label>Version anglaise<select name="english"><option value="keep" selected>Ne pas changer</option><option value="">Non</option>
-        <option value="review">Oui — je valide le texte avant la voix</option><option value="auto">Oui — publier automatiquement</option></select></label>` : ""}`,
+        <option value="review">Oui — je valide le texte avant la voix</option><option value="auto">Oui — publier automatiquement</option></select></label>
+      <label>Traduction de la version anglaise<select name="english_translator">${trOptions(true)}</select></label>` : ""}`,
     buttons: [{ label: "Annuler", kind: "ghost", value: null }, { label: "Relancer", primary: true }],
     submit: async (dlg) => {
       const v = (n) => dlg.querySelector(`[name=${n}]`).value;
@@ -568,6 +569,7 @@ async function retryDialog(job) {
       if (v("condense_pct") !== "keep") body.condense_pct = +v("condense_pct");
       if (v("condense_mode") !== "keep") body.condense_mode = v("condense_mode");
       if (can("english.create") && v("english") !== "keep") body.english = v("english");
+      if (can("english.create") && v("english_translator") !== "keep") body.english_translator = v("english_translator");
       await api(`/api/jobs/${job.id}/retry`, { method: "POST", body });
     },
   });
@@ -869,6 +871,7 @@ async function loadStatus() {
     refreshView();
   }
   if (state.view === "home") renderHomeStats();
+  renderTrSelects();
   const sel = $("parallelSelect");
   if (!sel.options.length) for (let n = 1; n <= s.max_parallel_limit; n++) sel.add(new Option(n, n));
   if (document.activeElement !== sel) sel.value = s.max_parallel;
@@ -1347,6 +1350,16 @@ function effectiveIntro(folder) {  // intro du dossier, sinon du parent le plus 
 const aiOptions = (extra = [], selected = "") => [...extra, ["", "Automatique (configuration de l'auteur du traitement)"], ["@server", "IA du serveur"],
   ...state.aiUsers.map((u) => [u.username, `Clé de ${u.display_name || u.username}`])]
   .map(([v, l]) => `<option value="${esc(v)}" ${v === selected ? "selected" : ""}>${esc(l)}</option>`).join("");
+// Traducteur de la version anglaise : le modèle local (par défaut) ou notre IA configurée, si elle est disponible pour cet utilisateur
+const trOptions = (keep = false) => {
+  const ai = !!state.status?.ai_enabled;
+  return `${keep ? '<option value="keep" selected>Ne pas changer</option>' : ""}<option value="">Par défaut (réglage de l'administrateur)</option>
+    <option value="local">Modèle libre local (gratuit, sans IA externe)</option>
+    <option value="claude" ${ai ? "" : "disabled"}>Notre IA configurée${ai ? "" : " (indisponible)"}</option>`;
+};
+function renderTrSelects() {
+  for (const id of ["jobTr", "batchTr"]) { const keep = $(id).value; $(id).innerHTML = trOptions(); $(id).value = keep; }
+}
 const aiLabel = (j) => j.ai_user === "@server" ? "IA du serveur (choisie par un administrateur)"
   : j.ai_user ? `Clé de « ${j.ai_user} » (choisie par un administrateur)` : "Configuration de l'auteur du traitement";
 
@@ -1501,7 +1514,7 @@ async function submitFile() {
   if (file.size > max) throw new Error(`Fichier trop volumineux (maximum ${fmtSize(max)})`);
   const fd = new FormData();
   fd.append("folder_id", state.current);
-  for (const k of ["title", "date", "start", "end", "intro_id", "ai_user", "condense_pct", "condense_mode", "english"]) fd.append(k, form[k].value);
+  for (const k of ["title", "date", "start", "end", "intro_id", "ai_user", "condense_pct", "condense_mode", "english", "english_translator"]) fd.append(k, form[k].value);
   fd.append("file", file);
   $("uploadProgress").hidden = false;
   try {
@@ -1539,6 +1552,8 @@ form.onsubmit = async (e) => {
 setSource("url");
 // le choix « me montrer les coupes avant » n'a de sens que si on raccourcit
 $("jobCondense").onchange = () => ($("jobModeBox").hidden = $("jobCondense").value === "0");
+form.english.onchange = () => ($("jobTrBox").hidden = !form.english.value);  // le traducteur n'a de sens que si la version anglaise est demandée
+$("batchEnglish").onchange = () => ($("batchTrBox").hidden = !$("batchEnglish").value);
 $("batchCondense").onchange = () => ($("batchModeBox").hidden = $("batchCondense").value === "0");
 
 // ---------- Traitement par lot : liens et fichiers à préparer ----------
@@ -1740,7 +1755,7 @@ $("batchRunBtn").onclick = (e) => busy(e.currentTarget, async () => {
         if (err) throw new Error(err);
         await api("/api/jobs", { method: "POST", body: { folder_id: folder, ...(r.kind === "file" ? { upload_id: r.uploadId } : { youtube_url: r.url }),
           title: r.title, date: r.date, start: r.start || null, end: r.end || null, intro_id: intro === "" ? null : +intro, ai_user: $("batchAiSelect").value,
-          condense_pct: +$("batchCondense").value, condense_mode: $("batchMode").value, english: $("batchEnglish").value } });
+          condense_pct: +$("batchCondense").value, condense_mode: $("batchMode").value, english: $("batchEnglish").value, english_translator: $("batchTr").value } });
         batch = batch.filter((x) => x !== r);
         ok++;
       } catch (err) { r.error = err.message; }
