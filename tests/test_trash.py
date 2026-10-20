@@ -92,12 +92,12 @@ with SessionLocal() as s:
 fe = ok(eve.post("/api/folders", json={"name": "Eve"}))["id"]
 uid = {u["username"]: u["id"] for u in ok(admin.get("/api/users"))}
 v = ok(admin.get(f"/api/users/{uid['bob']}/folders"))
-assert fe in [f["id"] for f in v["available"]] and v["assigned"] == []
+assert fe in [f["id"] for f in v["folders"]] and v["assigned"] == []
 assert bob.get(f"/api/users/{uid['bob']}/folders").status_code == 403
 ok(admin.put(f"/api/users/{uid['bob']}/folders", json={"folder_ids": [fe]}))
 assert fe in [f["id"] for f in ok(bob.get("/api/folders"))]                # Bob voit maintenant le dossier d'Eve
 ok(bob.delete(f"/api/folders/{fe}"), 403)                                  # sans pouvoir le supprimer
-assert [f["id"] for f in ok(admin.get(f"/api/users/{uid['bob']}/folders"))["assigned"]] == [fe]
+assert ok(admin.get(f"/api/users/{uid['bob']}/folders"))["assigned"] == [fe]
 ok(admin.put(f"/api/users/{uid['bob']}/folders", json={"folder_ids": []}))
 assert fe not in [f["id"] for f in ok(bob.get("/api/folders"))]
 ok(admin.put(f"/api/users/{uid['admin']}/folders", json={"folder_ids": []}), 400)  # un admin voit déjà tout
@@ -106,6 +106,22 @@ ok(admin.put(f"/api/users/{uid['bob']}/folders", json={"folder_ids": [fe]}))
 ok(eve.delete(f"/api/folders/{fe}")); ok(admin.put(f"/api/users/{uid['bob']}/folders", json={"folder_ids": []}))
 ok(eve.post(f"/api/trash/folder/{fe}/restore"))
 assert fe in [f["id"] for f in ok(bob.get("/api/folders"))]
+
+# --- arbre : un parent donne ses sous-dossiers, un sous-dossier peut être attribué seul, le redondant est écarté
+pp = ok(eve.post("/api/folders", json={"name": "Parent"}))["id"]
+cc = ok(eve.post("/api/folders", json={"name": "Enfant", "parent_id": pp}))["id"]
+gg = ok(eve.post("/api/folders", json={"name": "Petit-enfant", "parent_id": cc}))["id"]
+tree = {f["id"]: f["parent_id"] for f in ok(admin.get(f"/api/users/{uid['bob']}/folders"))["folders"]}
+assert tree[cc] == pp and tree[gg] == cc and tree[pp] is None             # le client dessine l'arbre avec ces parents
+ok(admin.put(f"/api/users/{uid['bob']}/folders", json={"folder_ids": [gg]}))   # seulement le petit-enfant
+seen = {f["id"]: f for f in ok(bob.get("/api/folders"))}
+assert gg in seen and cc not in seen and pp not in seen and seen[gg]["parent_id"] is None
+ok(admin.put(f"/api/users/{uid['bob']}/folders", json={"folder_ids": [cc]}))   # l'enfant : son petit-enfant est inclus
+assert {pp, cc, gg} & {f["id"] for f in ok(bob.get("/api/folders"))} == {cc, gg}
+r = ok(admin.put(f"/api/users/{uid['bob']}/folders", json={"folder_ids": [pp, cc, gg]}))  # parent + descendants : seul le parent reste
+assert r["assigned"] == [pp]
+assert {f["id"] for f in ok(bob.get("/api/folders"))} >= {pp, cc, gg}
+ok(admin.put(f"/api/users/{uid['bob']}/folders", json={"folder_ids": []}))
 
 # --- intros : suppression définitive réservée à l'administrateur
 ok(admin.post("/api/intros", files={"file": ("x.mp3", b"nope", "audio/mpeg")}), 400)  # fichier illisible : refusé, sans effet

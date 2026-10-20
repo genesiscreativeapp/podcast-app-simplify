@@ -1029,12 +1029,11 @@ def empty_trash(s=Depends(db)):
 
 # --- Permissions : dossiers attribués à un utilisateur ---------------------------------------------------
 def _user_folders(s, user: User) -> dict:
+    """Tous les dossiers présents (à plat, avec leur parent : le client dessine l'arbre) et ceux attribués explicitement."""
+    live = s.query(Folder).filter(Folder.deleted_at.is_(None)).order_by(Folder.name).all()
     assigned = {r[0] for r in s.query(FolderAccess.folder_id).filter(FolderAccess.user_id == user.id)}
-    item = lambda f: {"id": f.id, "path": _path(s, f), "created_by": f.created_by}
-    live = sorted(s.query(Folder).filter(Folder.deleted_at.is_(None)).all(), key=lambda f: _path(s, f).lower())
-    return {"own": [item(f) for f in live if f.created_by == user.username],
-            "assigned": [item(f) for f in live if f.id in assigned and f.created_by != user.username],
-            "available": [item(f) for f in live if f.id not in assigned and f.created_by != user.username]}
+    return {"folders": [{"id": f.id, "parent_id": f.parent_id, "name": f.name, "created_by": f.created_by} for f in live],
+            "assigned": sorted(i for i in assigned if any(f.id == i for f in live))}
 
 
 @app.get("/api/users/{user_id}/folders", dependencies=[Depends(auth.need("admin"))])
@@ -1048,12 +1047,23 @@ class UserFoldersIn(BaseModel):
 
 @app.put("/api/users/{user_id}/folders", dependencies=[Depends(auth.need("admin"))])
 def set_user_folders(user_id: int, body: UserFoldersIn, s=Depends(db)):
-    """Remplace les dossiers (créés par d'autres) attribués à cet utilisateur : il y travaille, sous-dossiers compris."""
+    """Remplace les dossiers attribués à cet utilisateur : chacun donne accès à ses sous-dossiers. Un sous-dossier peut être attribué seul."""
     user = s.get(User, user_id) or _404("Utilisateur")
     if user.is_admin:
         raise HTTPException(400, "Un administrateur voit déjà tous les dossiers")
     live = {f.id: f for f in s.query(Folder).filter(Folder.deleted_at.is_(None))}
     ids = {i for i in body.folder_ids if i in live and live[i].created_by != user.username}
+
+    def covered(i):  # un parent déjà attribué inclut ce dossier : l'attribuer en plus serait redondant
+        p, seen = live[i].parent_id, set()
+        while p in live and p not in seen:
+            if p in ids:
+                return True
+            seen.add(p)
+            p = live[p].parent_id
+        return False
+
+    ids = {i for i in ids if not covered(i)}
     # seules les attributions de dossiers présents sont remplacées : celles d'un dossier en corbeille reviennent avec lui
     s.query(FolderAccess).filter(FolderAccess.user_id == user_id, FolderAccess.folder_id.in_(list(live))).delete(synchronize_session=False)
     s.add_all(FolderAccess(folder_id=i, user_id=user_id) for i in ids)

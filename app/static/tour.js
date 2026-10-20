@@ -23,7 +23,7 @@ const TOUR_STEPS = [
   { view: "home", target: '[data-nav="intros"]', title: "Bibliothèque d'intros",
     text: "Les intros sont des fichiers MP3 ajoutés au début des podcasts. Sans choix, le podcast prend l'intro de son dossier, sinon l'intro par défaut (★)." },
   { view: "home", target: "#navPerms", when: () => !!state.me?.is_admin, title: "Permissions",
-    text: "Choisissez un utilisateur pour définir les actions qu'il peut faire, et lui attribuer des dossiers créés par d'autres. Vous voyez aussi toutes les corbeilles." },
+    text: "Choisissez un utilisateur : l'onglet Actions règle ce qu'il peut faire, l'onglet Dossiers lui attribue des dossiers (arborescence à cocher : un dossier entier, ou seulement certains sous-dossiers). Vous voyez aussi toutes les corbeilles." },
   { view: "home", target: "#navUsers", when: () => !!state.me?.is_admin, title: "Utilisateurs",
     text: "En tant qu'administrateur, créez les comptes et choisissez ce que chacun peut faire (voir, lancer, supprimer, rogner, gérer les dossiers…)." },
   { view: "home", target: "#userBtn", when: () => can("ai.key"), title: "Utiliser votre propre clé Anthropic (IA)",

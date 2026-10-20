@@ -1729,7 +1729,7 @@ $("usersList").addEventListener("click", async (e) => {
 });
 
 // ---------- Permissions (administrateur) ----------
-const permsState = { id: null, folders: null };
+const permsState = { id: null, tab: "actions", data: null, sel: new Set(), open: new Set() };
 async function loadPerms() {
   state.users = await api("/api/users");
   if (!state.users.some((u) => u.id === permsState.id)) permsState.id = (state.users.find((u) => !u.is_admin) || state.users[0])?.id ?? null;
@@ -1743,6 +1743,44 @@ function renderPermsUsers() {
       <span><b>${esc(u.display_name || u.username)}</b><small>@${esc(u.username)}${u.is_admin ? " · administrateur" : ""}${u.is_active ? "" : " · désactivé"}</small></span>
     </button>`).join("");
 }
+
+// Arbre des dossiers (comme le Finder) : une case par dossier.
+//  · cocher un dossier donne aussi accès à tout ce qu'il contient (ses cases passent en « inclus », verrouillées) ;
+//  · pour n'en donner qu'une partie, on coche seulement les sous-dossiers voulus : le parent apparaît alors « partiel » (tiret).
+const ftree = () => {
+  const d = permsState.data, byId = new Map(d.folders.map((f) => [f.id, f])), kids = new Map();
+  [...d.folders].sort((a, b) => a.name.localeCompare(b.name, "fr")).forEach((f) => kids.set(f.parent_id ?? null, [...(kids.get(f.parent_id ?? null) || []), f]));
+  const own = (f) => f.created_by === state.users.find((u) => u.id === permsState.id).username;
+  const ancestors = (f) => { const out = []; for (let p = byId.get(f.parent_id); p; p = byId.get(p.parent_id)) out.push(p); return out; };
+  const descendants = (f) => (kids.get(f.id) || []).flatMap((k) => [k, ...descendants(k)]);
+  // own : créé par lui ; implied : un dossier au-dessus donne l'accès ; direct : attribué ici ; partial : seuls certains sous-dossiers ; none
+  const stateOf = (f) => own(f) ? "own"
+    : ancestors(f).find((p) => own(p) || permsState.sel.has(p.id)) ? "implied"
+    : permsState.sel.has(f.id) ? "direct"
+    : descendants(f).some((x) => own(x) || permsState.sel.has(x.id)) ? "partial" : "none";
+  return { kids, byId, own, ancestors, descendants, stateOf };
+};
+function renderFolderTree() {
+  const T = ftree(), tag = { own: "créé par lui", implied: "inclus", direct: "attribué" };
+  const row = (f) => {
+    const st = T.stateOf(f), sub = T.kids.get(f.id) || [], open = permsState.open.has(f.id);
+    const by = f.created_by ? `Créé par ${f.created_by}` : "Créé par l'administration";
+    const via = st === "implied" ? ` — inclus via « ${T.ancestors(f).find((p) => T.own(p) || permsState.sel.has(p.id)).name} »` : "";
+    return `<li><div class="frow ${st}">
+      ${sub.length ? `<button type="button" class="tw ${open ? "open" : ""}" data-tw="${f.id}" aria-label="${open ? "Replier" : "Déplier"}" aria-expanded="${open}">▸</button>` : '<span class="tw"></span>'}
+      <label title="${esc(by + via)}"><input type="checkbox" data-fid="${f.id}" ${st === "direct" || st === "implied" || st === "own" ? "checked" : ""}
+        ${st === "partial" ? "data-partial" : ""} ${st === "own" || st === "implied" ? "disabled" : ""}> ${ic("folder")} <span>${esc(f.name)}</span></label>
+      ${tag[st] ? `<small class="ftag ${st}">${tag[st]}</small>` : ""}
+    </div>${sub.length && open ? `<ul>${sub.map(row).join("")}</ul>` : ""}</li>`;
+  };
+  const roots = T.kids.get(null) || [];
+  $("ftree").innerHTML = roots.length ? `<ul>${roots.map(row).join("")}</ul>` : '<p class="hint">Aucun dossier pour le moment.</p>';
+  $("ftree").querySelectorAll("[data-partial]").forEach((x) => (x.indeterminate = true));
+  const dirty = [...permsState.sel].sort().join() !== [...permsState.data.assigned].sort().join();
+  $("saveFolders").disabled = !dirty;
+  $("folderCount").textContent = permsState.sel.size ? String(permsState.sel.size) : "";
+  $("folderDirty").hidden = !dirty;
+}
 async function renderPermsPanel() {
   const u = state.users.find((x) => x.id === permsState.id), box = $("permsPanel");
   if (!u) { box.innerHTML = ""; return; }
@@ -1751,28 +1789,33 @@ async function renderPermsPanel() {
     box.innerHTML = `<div class="card"><h3>${name}</h3><p class="hint">Administrateur : toutes les actions sont autorisées et tous les dossiers sont visibles, y compris la corbeille de chacun. Ses droits ne se règlent pas ici.</p></div>`;
     return;
   }
-  const f = await api(`/api/users/${u.id}/folders`);
+  const data = await api(`/api/users/${u.id}/folders`);
   if (u.id !== permsState.id) return;  // l'administrateur a changé d'utilisateur pendant le chargement
-  permsState.folders = f;
-  const who = (c) => (c ? `créé par ${esc(c)}` : "créé par l'administration");
+  permsState.data = data;
+  permsState.sel = new Set(data.assigned);
+  const T0 = ftree();  // dossiers qui contiennent une attribution : dépliés d'emblée
+  permsState.open = new Set(data.assigned.flatMap((id) => T0.ancestors(T0.byId.get(id)).map((p) => p.id)));
   box.innerHTML = `
     <div class="card">
       <h3>${name} <small class="muted">@${esc(u.username)}</small></h3>
-      <div class="d-title">1 · Actions autorisées</div>
-      <div class="perm-list">${Object.entries(state.me.catalog).map(([k, l]) =>
-        `<label><input type="checkbox" name="perm" value="${k}" ${u.permissions.includes(k) ? "checked" : ""}> ${esc(l)}</label>`).join("")}</div>
-      <div class="dialog-foot"><button class="btn" data-perms="save">Enregistrer les actions</button></div>
-    </div>
-    <div class="card">
-      <div class="d-title">2 · Dossiers</div>
-      <p class="hint">Dossiers qu'il a créés lui-même :</p>
-      <ul class="plist">${f.own.length ? f.own.map((d) => `<li>${ic("folder")} ${esc(d.path)}</li>`).join("") : '<li class="muted">Aucun</li>'}</ul>
-      <p class="hint">Dossiers d'autres utilisateurs qui lui sont attribués (sous-dossiers inclus). Il y travaille sans pouvoir les modifier ni les supprimer :</p>
-      <ul class="plist">${f.assigned.length ? f.assigned.map((d) => `<li>${ic("folder")} ${esc(d.path)} <small class="muted">· ${who(d.created_by)}</small>
-        <button class="icon-btn" data-perms="unassign" data-id="${d.id}" title="Retirer ce dossier" aria-label="Retirer ce dossier">✕</button></li>`).join("") : '<li class="muted">Aucun</li>'}</ul>
-      ${f.available.length ? `<div class="perm-add"><select id="permsAdd">${f.available.map((d) => `<option value="${d.id}">${esc(d.path)} — ${who(d.created_by)}</option>`).join("")}</select>
-        <button class="btn" data-perms="assign">Attribuer</button></div>` : '<p class="hint">Aucun autre dossier à attribuer.</p>'}
+      <div class="tabs" role="tablist" aria-label="Permissions de ${name}">
+        <button type="button" role="tab" data-ptab="actions" class="${permsState.tab === "actions" ? "active" : ""}" aria-selected="${permsState.tab === "actions"}">Actions autorisées</button>
+        <button type="button" role="tab" data-ptab="folders" class="${permsState.tab === "folders" ? "active" : ""}" aria-selected="${permsState.tab === "folders"}">Dossiers <span class="count" id="folderCount"></span></button>
+      </div>
+      <div data-pane="actions" ${permsState.tab === "actions" ? "" : "hidden"}>
+        <p class="hint">Ce que cet utilisateur a le droit de faire.</p>
+        <div class="perm-list">${Object.entries(state.me.catalog).map(([k, l]) =>
+          `<label><input type="checkbox" name="perm" value="${k}" ${u.permissions.includes(k) ? "checked" : ""}> ${esc(l)}</label>`).join("")}</div>
+        <div class="dialog-foot"><button class="btn" data-perms="save">Enregistrer les actions</button></div>
+      </div>
+      <div data-pane="folders" ${permsState.tab === "folders" ? "" : "hidden"}>
+        <p class="hint">Cochez un dossier pour que <b>${name}</b> y travaille : <b>tout ce qu'il contient est alors inclus</b>. Pour ne donner qu'une partie, dépliez et cochez uniquement les sous-dossiers voulus (le dossier au-dessus apparaît alors « partiel »). Il ne peut ni modifier ni supprimer ce qu'il n'a pas créé ; ses propres dossiers sont toujours inclus.</p>
+        <div id="ftree" class="ftree"></div>
+        <div class="dialog-foot"><span class="hint" id="folderDirty" hidden>Modifications non enregistrées</span>
+          <button class="btn" id="saveFolders" data-perms="savefolders" disabled>Enregistrer les dossiers</button></div>
+      </div>
     </div>`;
+  renderFolderTree();
 }
 $("permsUsers").addEventListener("click", (e) => {
   const b = e.target.closest("[data-pu]");
@@ -1782,10 +1825,23 @@ $("permsUsers").addEventListener("click", (e) => {
   renderPermsPanel();
 });
 $("permsPanel").addEventListener("click", async (e) => {
+  const tab = e.target.closest("[data-ptab]");
+  if (tab) {  // les deux volets restent dans la page : ce qui est coché n'est pas perdu en changeant d'onglet
+    permsState.tab = tab.dataset.ptab;
+    $("permsPanel").querySelectorAll("[data-ptab]").forEach((t) => { const on = t === tab; t.classList.toggle("active", on); t.setAttribute("aria-selected", on); });
+    $("permsPanel").querySelectorAll("[data-pane]").forEach((p) => (p.hidden = p.dataset.pane !== permsState.tab));
+    return;
+  }
+  const tw = e.target.closest("[data-tw]");
+  if (tw) {
+    const id = +tw.dataset.tw;
+    permsState.open.has(id) ? permsState.open.delete(id) : permsState.open.add(id);
+    renderFolderTree();
+    return;
+  }
   const b = e.target.closest("[data-perms]");
   if (!b) return;
   const u = state.users.find((x) => x.id === permsState.id), act = b.dataset.perms;
-  const ids = permsState.folders.assigned.map((d) => d.id);
   await busy(b, async () => {
     try {
       if (act === "save") {
@@ -1793,14 +1849,22 @@ $("permsPanel").addEventListener("click", async (e) => {
         Object.assign(u, upd);
         toast(`Actions de ${u.display_name || u.username} enregistrées`, "ok");
       } else {
-        const next = act === "assign" ? [...ids, +$("permsAdd").value] : ids.filter((i) => i !== +b.dataset.id);
-        await api(`/api/users/${u.id}/folders`, { method: "PUT", body: { folder_ids: next } });
-        toast(act === "assign" ? "Dossier attribué" : "Dossier retiré", "ok");
-        await renderPermsPanel();
+        permsState.data = await api(`/api/users/${u.id}/folders`, { method: "PUT", body: { folder_ids: [...permsState.sel] } });
+        permsState.sel = new Set(permsState.data.assigned);  // le serveur écarte ce qui est déjà inclus par un parent
+        renderFolderTree();
+        toast(`Dossiers de ${u.display_name || u.username} enregistrés`, "ok");
         loadFolders();
       }
     } catch (err) { toast(err.message, true); }
   });
+});
+$("permsPanel").addEventListener("change", (e) => {
+  const box = e.target.closest("[data-fid]");
+  if (!box) return;
+  const T = ftree(), f = T.byId.get(+box.dataset.fid);
+  if (permsState.sel.has(f.id)) permsState.sel.delete(f.id);
+  else { permsState.sel.add(f.id); T.descendants(f).forEach((x) => permsState.sel.delete(x.id)); permsState.open.add(f.id); }  // le contenu est inclus : plus besoin de le lister
+  renderFolderTree();
 });
 
 // ---------- Corbeille ----------

@@ -573,3 +573,22 @@ button.pill { border: 0; font: inherit; }
 .usage-table th { text-align: left; color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; padding: 6px 8px; border-bottom: 1px solid var(--border); }
 .usage-table td { padding: 7px 8px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
 .usage-table th:not(:first-child), .usage-table td:not(:first-child) { text-align: right; }
+
+/* Onglets et arbre des dossiers (écran Permissions) */
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin: 10px 0 14px; }
+.tabs button { border: 0; background: none; font: inherit; font-weight: 600; color: var(--muted); padding: 10px 16px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; border-radius: 8px 8px 0 0; display: inline-flex; align-items: center; gap: 8px; }
+.tabs button:hover { color: var(--text); }
+.tabs button.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tabs .count { font-size: 11px; background: var(--accent-soft); color: var(--accent); border-radius: 99px; padding: 1px 7px; } .tabs .count:empty { display: none; }
+.ftree { border: 1px solid var(--border); border-radius: 12px; padding: 8px; max-height: 420px; overflow: auto; background: var(--bg); }
+.ftree ul { list-style: none; margin: 0; padding-left: 20px; } .ftree > ul { padding-left: 0; }
+.frow { display: flex; align-items: center; gap: 4px; padding: 3px 6px; border-radius: 8px; }
+.frow:hover { background: var(--panel); }
+.frow label { flex-direction: row; display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; cursor: pointer; font-weight: 400; margin: 0; }
+.frow label span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.frow .ico { width: 16px; height: 16px; color: var(--accent); flex-shrink: 0; }
+.frow.own label, .frow.implied label { cursor: default; opacity: .75; }
+.tw { width: 20px; height: 20px; border: 0; background: none; color: var(--muted); font-size: 11px; cursor: pointer; padding: 0; border-radius: 6px; transition: transform .12s; flex-shrink: 0; }
+button.tw:hover { background: var(--border); } .tw.open { transform: rotate(90deg); }
+.ftag { font-size: 11px; color: var(--muted); white-space: nowrap; } .ftag.direct { color: var(--accent); font-weight: 600; }
+.frow.partial label span { font-weight: 600; }
