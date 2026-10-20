@@ -13,12 +13,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import func, or_
 
-from . import auth, config, r2sync, storage
+from . import auth, config, r2sync, storage, vault
 from .access import Access
 from .pipeline import audio
 from .db import (MAX_PARALLEL_LIMIT, Folder, FolderAccess, Intro, Job, Setting, SessionLocal, User, folder_path,
-                 ai_enabled, get_max_parallel, init_db, queue_position)
+                 ai_enabled, ai_for, get_max_parallel, has_perm, init_db, personal_key, queue_position)
 from .pipeline import steps
+from .pipeline.detect import ask_llm
 from .utils import fmt_time, parse_time, slugify
 
 STATIC = Path(__file__).parent / "static"
@@ -77,7 +78,7 @@ def job_steps(j: Job, ai: bool | None = None) -> list[dict]:
 
 def job_dict(j: Job, with_log: bool = False, s=None, a: Access | None = None) -> dict:
     d = {
-        "steps": job_steps(j, ai_enabled(s) if s is not None else None),
+        "steps": job_steps(j, ai_for(s, j.created_by)[0] if s is not None else None),
         "id": j.id, "folder_id": j.folder_id, "intro_id": j.intro_id, "youtube_url": j.youtube_url,
         "title": j.title, "date": j.date, "filename": j.filename,
         "status": j.status, "step": j.step, "progress": round(j.progress or 0, 3),
@@ -728,13 +729,17 @@ def job_link(job_id: int, fmt: str, s=Depends(db), a: Access = Depends(acl)):
 
 
 @app.get("/api/status", dependencies=[Depends(auth.need("jobs.view"))])
-def status(s=Depends(db), a: Access = Depends(acl)):
+def status(request: Request, s=Depends(db), a: Access = Depends(acl)):
     count = lambda st: a.jobs(s.query(Job)).filter(Job.status == st).count()
+    server = config.LLM_PROVIDER if config.LLM_PROVIDER in ("anthropic", "openai") else None
+    on, key = ai_for(s, request.state.user.username)  # l'IA telle qu'elle servira à CET utilisateur
+    own = personal_key(request.state.user)
     return {
         "r2": storage.enabled(),
-        "llm": config.LLM_PROVIDER if ai_enabled(s) else None,  # fournisseur réellement utilisé (None = heuristique)
-        "ai_available": config.LLM_PROVIDER in ("anthropic", "openai"), "ai_enabled": ai_enabled(s),
-        "llm_provider": config.LLM_PROVIDER if config.LLM_PROVIDER in ("anthropic", "openai") else None,
+        "llm": ("anthropic" if key else server) if on else None,  # fournisseur réellement utilisé (None = heuristique)
+        "ai_available": bool(server or own), "ai_enabled": on, "ai_personal": bool(key),
+        "ai_global": ai_enabled(s), "server_provider": server,  # réglage du serveur (interrupteur de l'administrateur)
+        "llm_provider": "anthropic" if own else server,
         "running": count("running"), "pending": count("pending"),
         "r2_sync": r2sync.status(),
         "max_parallel": get_max_parallel(s), "max_parallel_limit": MAX_PARALLEL_LIMIT,
@@ -768,6 +773,58 @@ def put_ai(body: AiIn, s=Depends(db)):
     s.merge(Setting(key="ai_enabled", value="1" if body.enabled else "0"))
     s.commit()
     return {"ai_enabled": ai_enabled(s)}
+
+
+# --- IA personnelle : clé Anthropic propre à l'utilisateur, et interrupteur pour ses seuls traitements ---------
+def _my_ai(user: User) -> dict:
+    key = vault.decrypt(user.llm_key) if user.llm_key else None
+    return {"has_key": bool(key), "key_hint": f"sk-ant-…{key[-4:]}" if key else "", "enabled": user.ai_on,
+            "can_key": has_perm(user, "ai.key"), "can_toggle": has_perm(user, "ai.toggle"),
+            "server_ai": config.LLM_PROVIDER in ("anthropic", "openai")}
+
+
+@app.get("/api/me/ai")
+def get_my_ai(request: Request, s=Depends(db)):
+    return _my_ai(s.get(User, request.state.user.id))
+
+
+class MyAiIn(BaseModel):
+    enabled: bool
+
+
+@app.put("/api/me/ai", dependencies=[Depends(auth.need("ai.toggle"))])
+def put_my_ai(body: MyAiIn, request: Request, s=Depends(db)):
+    user = s.get(User, request.state.user.id)
+    user.ai_on = body.enabled
+    s.commit()
+    return _my_ai(user)
+
+
+class MyKeyIn(BaseModel):
+    key: str
+
+
+@app.put("/api/me/ai/key", dependencies=[Depends(auth.need("ai.key"))])
+def put_my_key(body: MyKeyIn, request: Request, s=Depends(db)):
+    key = body.key.strip()
+    if not re.fullmatch(r"sk-ant-[A-Za-z0-9_-]{20,}", key):
+        raise HTTPException(400, "Ce n'est pas une clé Anthropic (elle commence par « sk-ant- »)")
+    try:  # petit appel réel : la clé doit pouvoir servir au traitement (crédit, modèle autorisé…)
+        ask_llm("Réponds OK.", max_tokens=5, key=key)
+    except Exception as exc:
+        raise HTTPException(400, f"Clé refusée ou inutilisable : {exc}")
+    user = s.get(User, request.state.user.id)
+    user.llm_key = vault.encrypt(key)
+    s.commit()
+    return _my_ai(user)
+
+
+@app.delete("/api/me/ai/key")
+def delete_my_key(request: Request, s=Depends(db)):
+    user = s.get(User, request.state.user.id)
+    user.llm_key = None
+    s.commit()
+    return _my_ai(user)
 
 
 class SettingsIn(BaseModel):
@@ -854,6 +911,22 @@ def logout(request: Request, response: Response, s=Depends(db)):
 @app.get("/api/auth/me")
 def me(request: Request):
     return {**auth.user_dict(request.state.user), "catalog": auth.PERMISSIONS}
+
+
+class ProfileIn(BaseModel):
+    display_name: str
+
+
+@app.patch("/api/auth/me")
+def update_me(body: ProfileIn, request: Request, s=Depends(db)):
+    """L'utilisateur change son propre nom affiché (l'identifiant, lui, ne change pas)."""
+    name = body.display_name.strip()
+    if len(name) > 120:
+        raise HTTPException(400, "Nom trop long (120 caractères maximum)")
+    user = s.get(User, request.state.user.id)
+    user.display_name = name
+    s.commit()
+    return auth.user_dict(user)
 
 
 @app.post("/api/auth/password")

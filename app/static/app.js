@@ -49,6 +49,8 @@ const ICONS = {
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
   moon: '<path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/>',
   upload: '<path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M4 20h16"/>',
+  sparkle: '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z"/>',
+  help: '<circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.4-1 .9-1 1.7M12 17h.01"/>',
 };
 const ic = (n) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n] || ""}</svg>`;
 const hydrateIcons = (root = document) => root.querySelectorAll("[data-ic]").forEach((el) => { el.innerHTML = ic(el.dataset.ic); });
@@ -200,32 +202,54 @@ $("userMenu").addEventListener("click", async (e) => {
   if (b.dataset.user === "logout") {
     await api("/api/auth/logout", { method: "POST" }).catch(() => {});
     showLogin();
+  } else if (b.dataset.user === "ai") {
+    await myAiDialog();
   } else {
-    await modal({
-      title: "Changer mon mot de passe",
-      body: `<label>Mot de passe actuel<input type="password" name="current" autocomplete="current-password"></label>
-             <label>Nouveau mot de passe (8 caractères minimum)<input type="password" name="new" autocomplete="new-password"></label>
-             <label>Confirmer<input type="password" name="confirm" autocomplete="new-password"></label>`,
-      buttons: [{ label: "Annuler", kind: "ghost", value: null }, { label: "Enregistrer", primary: true }],
-      submit: async (dlg) => {
-        const v = (n) => dlg.querySelector(`[name=${n}]`).value;
-        if (v("new") !== v("confirm")) throw new Error("La confirmation ne correspond pas");
-        await api("/api/auth/password", { method: "POST", body: { current: v("current"), new: v("new") } });
-        toast("Mot de passe modifié", "ok");
-      },
-    });
+    await profileDialog();
   }
 });
 
+async function profileDialog() {  // nom affiché et mot de passe : tout utilisateur gère son propre compte
+  const r = await modal({
+    title: "Mon profil",
+    body: `<label>Identifiant<input value="${esc(state.me.username)}" disabled></label>
+      <label>Nom affiché<input name="display_name" value="${esc(state.me.display_name || "")}" maxlength="120" autocomplete="name" placeholder="${esc(state.me.username)}"></label>
+      <div class="d-title">Changer le mot de passe <span class="hint">(facultatif)</span></div>
+      <label>Mot de passe actuel<input type="password" name="current" autocomplete="current-password"></label>
+      <label>Nouveau mot de passe (8 caractères minimum)<input type="password" name="new" autocomplete="new-password"></label>
+      <label>Confirmer<input type="password" name="confirm" autocomplete="new-password"></label>`,
+    buttons: [{ label: "Annuler", kind: "ghost", value: null }, { label: "Enregistrer", primary: true }],
+    submit: async (dlg) => {
+      const v = (n) => dlg.querySelector(`[name=${n}]`).value;
+      const pwd = v("current") || v("new") || v("confirm");
+      if (pwd) {  // d'abord le mot de passe : s'il est refusé, rien d'autre n'est enregistré
+        if (v("new") !== v("confirm")) throw new Error("La confirmation ne correspond pas");
+        await api("/api/auth/password", { method: "POST", body: { current: v("current"), new: v("new") } });
+      }
+      if (v("display_name").trim() !== (state.me.display_name || "")) {
+        state.me = { ...state.me, ...(await api("/api/auth/me", { method: "PATCH", body: { display_name: v("display_name") } })) };
+        paintUser();
+      }
+      return { pwd: !!pwd };
+    },
+  });
+  if (r) toast(r.pwd ? "Profil et mot de passe enregistrés" : "Profil enregistré", "ok");
+}
+
 // ---------- Démarrage et navigation ----------
+function paintUser() {
+  const name = state.me.display_name || state.me.username;
+  $("userName").textContent = name;
+  $("userAvatar").textContent = name.slice(0, 1).toUpperCase();
+}
+
 async function startApp() {
   $("loginScreen").hidden = true;
   $("app").hidden = false;
   $("boot").hidden = true;
-  const name = state.me.display_name || state.me.username;
-  $("userName").textContent = name;
-  $("userAvatar").textContent = name.slice(0, 1).toUpperCase();
+  paintUser();
   $("navUsers").hidden = !state.me.is_admin;
+  $("menuAi").hidden = !(can("ai.key") || can("ai.toggle"));
   $("emptyNewBtn").hidden = !can("folders.manage");
   $("parallelBox").hidden = !can("settings.manage");
   $("introForm").hidden = !can("intros.manage");
@@ -234,6 +258,7 @@ async function startApp() {
   loadStatus();
   await route();
   tick();
+  if (!tourSeen()) setTimeout(startTour, 500);  // première connexion de ce compte sur ce navigateur
 }
 
 function route() {
@@ -533,24 +558,50 @@ async function trimDialog(job) {
 }
 
 // ---------- Statut, parallélisme ----------
-function aiPill(s) {  // l'administrateur clique pour activer / désactiver l'IA
-  if (!s.ai_available) return '<span class="pill" title="Aucun fournisseur d\'IA configuré (LLM_PROVIDER)">Détection heuristique</span>';
-  const label = s.ai_enabled ? `IA activée (${esc(s.llm_provider)})` : "IA désactivée";
-  return state.me.is_admin ? `<button type="button" class="pill link ${s.ai_enabled ? "on" : "off"}" data-ai title="Activer / désactiver l'IA">${label}</button>`
+function aiPill(s) {  // cliquable : l'administrateur règle l'IA du serveur, les autres leur IA personnelle (selon leurs droits)
+  const mine = can("ai.key") || can("ai.toggle");
+  const open = state.me.is_admin ? s.server_provider : mine;
+  if (!s.ai_available) return mine ? '<button type="button" class="pill link" data-ai title="Ajouter ma clé Anthropic pour utiliser l\'IA">Détection heuristique · ajouter ma clé</button>'
+    : '<span class="pill" title="Aucun fournisseur d\'IA configuré (LLM_PROVIDER)">Détection heuristique</span>';
+  const label = s.ai_enabled ? `IA activée (${s.ai_personal ? "ma clé" : esc(s.llm_provider)})` : "IA désactivée";
+  return open ? `<button type="button" class="pill link ${s.ai_enabled ? "on" : "off"}" data-ai title="Régler l'IA">${label}</button>`
     : `<span class="pill ${s.ai_enabled ? "on" : ""}">${label}</span>`;
 }
-async function aiDialog() {
-  const s = state.status, on = s.ai_enabled;
+async function aiDialog() {  // administrateur : IA du serveur (s'applique à tous ceux qui n'ont pas leur propre clé)
+  const s = state.status, on = s.ai_global;
   const r = await modal({
     title: "Utilisation de l'IA", icon: "✨",
-    body: `<p>L'IA (${esc(s.llm_provider)}) repère le début et la fin de la prédication et retire l'adoration, les témoignages et les annonces. Elle est actuellement <b>${on ? "activée" : "désactivée"}</b>.</p>
-      <p>${on ? "En la désactivant : repérage par heuristique (moins fiable), adoration, témoignages et annonces <b>non retirés</b>, et plus aucun appel (donc aucun coût) vers l'API."
+    body: `<p>L'IA du serveur (${esc(s.server_provider)}) repère le début et la fin de la prédication et retire l'adoration, les témoignages et les annonces. Elle est actuellement <b>${on ? "activée" : "désactivée"}</b>.</p>
+      <p>${on ? "En la désactivant : repérage par heuristique (moins fiable), adoration, témoignages et annonces <b>non retirés</b>, et plus aucun appel (donc aucun coût) vers l'API du serveur."
         : "En l'activant : les prochains traitements utilisent l'IA (appels payants à l'API : vérifiez votre crédit)."}</p>
-      <p class="hint">S'applique aux traitements qui démarrent à partir de maintenant ; ceux déjà en cours gardent leur choix.</p>`,
-    buttons: [{ label: "Annuler", kind: "ghost", value: null }, { label: on ? "Désactiver l'IA" : "Activer l'IA", kind: on ? "danger-fill" : "", primary: true }],
+      <p class="hint">Les utilisateurs qui ont enregistré leur propre clé Anthropic ne sont pas concernés. S'applique aux traitements qui démarrent à partir de maintenant.</p>`,
+    buttons: [{ label: "Annuler", kind: "ghost", value: null }, ...(can("ai.key") || can("ai.toggle") ? [{ label: "Mon IA personnelle…", kind: "ghost", value: "mine" }] : []),
+      { label: on ? "Désactiver l'IA" : "Activer l'IA", kind: on ? "danger-fill" : "", primary: true }],
     submit: () => api("/api/settings/ai", { method: "PUT", body: { enabled: !on } }),
   });
+  if (r === "mine") return myAiDialog();
   if (r) { toast(on ? "IA désactivée" : "IA activée", "ok"); await loadStatus(); refreshView(); }
+}
+async function myAiDialog() {  // clé Anthropic personnelle et interrupteur pour ses propres traitements
+  const m = await api("/api/me/ai");
+  const r = await modal({
+    title: "Mon IA", icon: "✨",
+    body: `<p>L'IA repère la prédication et retire l'adoration, les témoignages et les annonces de <b>vos</b> traitements.</p>
+      ${m.can_toggle ? `<label class="check"><input type="checkbox" name="ai_on" ${m.enabled ? "checked" : ""}> Utiliser l'IA pour mes traitements</label>` : ""}
+      ${m.can_key ? `<label>Ma clé Anthropic ${m.has_key ? `<span class="hint">(enregistrée : ${esc(m.key_hint)})</span>` : ""}
+          <input name="key" type="password" autocomplete="off" placeholder="${m.has_key ? "Laisser vide pour la conserver" : "sk-ant-…"}"></label>
+        <p class="hint">${m.has_key ? "Vos traitements utilisent votre clé : les appels sont facturés sur votre compte Anthropic." : m.server_ai ? "Sans clé personnelle, la clé du serveur est utilisée (si l'administrateur l'a activée)." : "Aucune IA n'est configurée sur le serveur : ajoutez votre clé pour en profiter."}
+          Elle est vérifiée à l'enregistrement, stockée chiffrée sur le serveur et ne sert qu'à vos traitements. Créez-en une sur console.anthropic.com.</p>` : ""}`,
+    buttons: [{ label: "Annuler", kind: "ghost", value: null }, ...(m.has_key ? [{ label: "Supprimer ma clé", kind: "danger", value: "delete" }] : []),
+      { label: "Enregistrer", primary: true }],
+    submit: async (dlg) => {
+      const on = dlg.querySelector("[name=ai_on]"), key = dlg.querySelector("[name=key]")?.value.trim();
+      if (key) await api("/api/me/ai/key", { method: "PUT", body: { key } });
+      if (on && on.checked !== m.enabled) await api("/api/me/ai", { method: "PUT", body: { enabled: on.checked } });
+    },
+  });
+  if (r === "delete") await api("/api/me/ai/key", { method: "DELETE" });
+  if (r) { toast(r === "delete" ? "Clé supprimée" : "Réglages de l'IA enregistrés", "ok"); await loadStatus(); refreshView(); }
 }
 
 function r2Pill(s) {
@@ -579,7 +630,7 @@ async function r2Dialog() {
 }
 $("statusBar").addEventListener("click", (e) => {
   if (e.target.closest("[data-r2]")) r2Dialog();
-  else if (e.target.closest("[data-ai]")) aiDialog();
+  else if (e.target.closest("[data-ai]")) (state.me.is_admin && state.status?.server_provider ? aiDialog : myAiDialog)();
 });
 
 async function loadStatus() {

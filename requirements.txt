@@ -8,3 +8,4 @@ faster-whisper>=1.1
 numpy
 soundfile
 boto3
+cryptography

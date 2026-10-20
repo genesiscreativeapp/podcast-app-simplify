@@ -55,7 +55,7 @@ Bouton **Rogner** sur un podcast terminé : on écoute, on place le curseur et �
 ## Connexion, utilisateurs et permissions
 
 - Écran de connexion avec session (cookie `HttpOnly`) ; 5 échecs en 5 minutes bloquent les essais pendant quelques minutes.
-- **Utilisateurs** (administrateur) : le compte administrateur système (créé au démarrage) est protégé, on ne peut ni le modifier, ni le désactiver, ni le supprimer ; créer des comptes, les activer/désactiver, réinitialiser un mot de passe et choisir les fonctions autorisées : voir et télécharger, lancer/relancer, supprimer, gérer les dossiers, gérer les intros, régler le parallélisme. L'administrateur a tous les droits et seul gère les comptes. Chaque utilisateur peut changer son mot de passe (menu en haut à droite).
+- **Utilisateurs** (administrateur) : le compte administrateur système (créé au démarrage) est protégé, on ne peut ni le modifier, ni le désactiver, ni le supprimer ; créer des comptes, les activer/désactiver, réinitialiser un mot de passe et choisir les fonctions autorisées : voir et télécharger, lancer/relancer, supprimer, gérer les dossiers, gérer les intros, régler le parallélisme, utiliser sa propre clé Anthropic, activer/désactiver l'IA pour ses traitements. L'administrateur a tous les droits et seul gère les comptes. Chaque utilisateur peut changer son mot de passe (menu en haut à droite).
 
 ## Historique, détails et liens directs
 
@@ -70,6 +70,8 @@ Bouton **Rogner** sur un podcast terminé : on écoute, on place le curseur et �
 - **Bornes manuelles** : si vous les saisissez, l'étape de repérage est sautée et le traitement est bien plus rapide.
 
 **Activer / désactiver l'IA.** L'administrateur clique sur la pastille « IA activée / désactivée » en haut de l'interface : sans crédit ou pour ne rien dépenser, l'IA est coupée sans toucher à la configuration (`LLM_PROVIDER` reste en place). Désactivée, le repérage passe par l'heuristique et l'adoration, les témoignages et les annonces ne sont pas retirés. S'applique aux traitements qui démarrent ensuite.
+
+**IA personnelle (clé Anthropic par utilisateur).** Avec la permission **« Utiliser sa propre clé Anthropic »**, un utilisateur enregistre sa clé via le menu en haut à droite (« Mon IA ») : elle est vérifiée par un petit appel à l'enregistrement, puis stockée **chiffrée** et ne sert qu'à **ses** traitements (appels facturés sur son compte Anthropic, y compris si le serveur n'a aucune IA configurée ou si l'administrateur a coupé celle du serveur). Avec la permission **« Activer ou désactiver l'IA pour ses traitements »**, il peut aussi la couper pour lui seul (pastille « IA » ou « Mon IA ») ; sans elle, l'IA suit le réglage du serveur. Si l'administrateur retire une permission, elle cesse de s'appliquer aussitôt (la clé reste stockée, mais inutilisée). Le chiffrement utilise `SECRET_KEY` ou, à défaut, `data/secret.key` : **sauvegardez-le avec `data/`**, sinon les clés enregistrées deviennent illisibles (elles sont alors à ressaisir).
 
 **Traitement par lot.** Une ligne = un traitement : un lien YouTube **ou** un fichier audio / vidéo, avec son propre nom, sa date, son début / fin et son intro (celle de la liste par défaut). Les fichiers ajoutés à un lot sont **envoyés sur le serveur dès leur ajout** (zone d'attente `data/staging`) : ils restent dans la liste après un rechargement de la page, un autre navigateur ou un autre appareil, et sont supprimés s'ils ne sont pas lancés au bout de `STAGING_DAYS` jours (7 par défaut). Retirer une ligne supprime aussi son fichier du serveur.
 

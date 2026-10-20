@@ -7,7 +7,7 @@ from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Te
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
-from . import config
+from . import config, vault
 from .config import DB_PATH
 
 engine = create_engine(
@@ -43,6 +43,8 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     last_login: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     max_parallel: Mapped[int] = mapped_column(Integer, default=5)  # traitements simultanés de cet utilisateur ; réglé par un admin
+    llm_key: Mapped[str | None] = mapped_column(Text, nullable=True)  # clé Anthropic personnelle, chiffrée (vault)
+    ai_on: Mapped[bool] = mapped_column(Boolean, default=True)  # IA voulue pour ses traitements (permission ai.toggle)
 
     @property
     def perms(self) -> set[str]:
@@ -159,6 +161,7 @@ def _init_db() -> None:
         for table, col, sql_type in (("jobs", "intro_id", "INTEGER"), ("folders", "intro_id", "INTEGER"),
                                      ("jobs", "edit_note", "TEXT"), ("jobs", "created_by", "VARCHAR(60)"),
                                      ("users", "is_system", "BOOLEAN DEFAULT 0"), ("users", "max_parallel", "INTEGER DEFAULT 5"),
+                                     ("users", "llm_key", "TEXT"), ("users", "ai_on", "BOOLEAN DEFAULT 1"),
                                      ("folders", "created_by", "VARCHAR(60)")):
             cols = {r[1] for r in conn.execute(text(f"PRAGMA table_info({table})"))}
             if col not in cols:
@@ -172,6 +175,26 @@ def ai_enabled(session) -> bool:
     """L'IA sert si un fournisseur est configuré (LLM_PROVIDER) ET que l'administrateur ne l'a pas désactivée dans l'interface."""
     row = session.get(Setting, "ai_enabled")
     return config.LLM_PROVIDER in ("anthropic", "openai") and (row is None or row.value != "0")
+
+
+def has_perm(user: User | None, perm: str) -> bool:
+    return bool(user) and (user.is_admin or perm in user.perms)
+
+
+def personal_key(user: User | None) -> str | None:
+    """Clé Anthropic personnelle (déchiffrée), si l'utilisateur en a une et en a encore le droit."""
+    return vault.decrypt(user.llm_key) if user and user.llm_key and has_perm(user, "ai.key") else None
+
+
+def ai_for(session, username: str | None) -> tuple[bool, str | None]:
+    """(IA utilisée, clé Anthropic personnelle ou None) pour les traitements de cet utilisateur.
+    Sa clé personnelle (permission ai.key) remplace celle du serveur, même si l'administrateur a coupé l'IA du serveur.
+    Il peut couper l'IA pour lui seul (permission ai.toggle) ; sans cette permission, l'IA suit le réglage du serveur."""
+    user = session.query(User).filter(User.username == username).first() if username else None
+    if has_perm(user, "ai.toggle") and not user.ai_on:
+        return False, None
+    key = personal_key(user)
+    return (True, key) if key else (ai_enabled(session), None)
 
 
 def get_max_parallel(session) -> int:

@@ -43,7 +43,7 @@ def build_transcript(segments: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _check_llm(r: httpx.Response) -> None:
+def _check_llm(r: httpx.Response, provider: str) -> None:
     """Remonte le message de l'API (crédit épuisé, modèle inconnu, clé refusée…) au lieu d'un simple « 400 »."""
     if r.is_success:
         return
@@ -51,21 +51,23 @@ def _check_llm(r: httpx.Response) -> None:
         msg = r.json()["error"]["message"]
     except Exception:
         msg = r.text[:300]
-    raise RuntimeError(f"API {config.LLM_PROVIDER} {r.status_code} : {msg}")
+    raise RuntimeError(f"API {provider} {r.status_code} : {msg}")
 
 
-def ask_llm(prompt: str, max_tokens: int = 400) -> str:
+def ask_llm(prompt: str, max_tokens: int = 400, key: str | None = None) -> str:
+    """`key` : clé Anthropic personnelle de l'utilisateur ; elle remplace le fournisseur du serveur."""
     timeout = httpx.Timeout(180.0)
-    if config.LLM_PROVIDER == "anthropic":
+    if key or config.LLM_PROVIDER == "anthropic":
+        model = config.LLM_MODEL if config.LLM_PROVIDER == "anthropic" else ""  # LLM_MODEL d'un autre fournisseur ne convient pas
         r = httpx.post(
             "https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": config.LLM_API_KEY, "anthropic-version": "2023-06-01",
+            headers={"x-api-key": key or config.LLM_API_KEY, "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
-            json={"model": config.LLM_MODEL or "claude-haiku-4-5-20251001", "max_tokens": max_tokens,
+            json={"model": model or "claude-haiku-4-5-20251001", "max_tokens": max_tokens,
                   "messages": [{"role": "user", "content": prompt}]},
             timeout=timeout,
         )
-        _check_llm(r)
+        _check_llm(r, "anthropic")
         return "".join(b.get("text", "") for b in r.json()["content"])
     # API compatible OpenAI (OpenAI, Groq, OpenRouter, Ollama, LM Studio…)
     headers = {"content-type": "application/json"}
@@ -78,14 +80,14 @@ def ask_llm(prompt: str, max_tokens: int = 400) -> str:
               "messages": [{"role": "user", "content": prompt}]},
         timeout=timeout,
     )
-    _check_llm(r)
+    _check_llm(r, config.LLM_PROVIDER)
     return r.json()["choices"][0]["message"]["content"]
 
 
-def detect_with_llm(segments: list[dict], title: str | None) -> tuple[float, float, str]:
+def detect_with_llm(segments: list[dict], title: str | None, key: str | None = None) -> tuple[float, float, str]:
     prompt = PROMPT.format(title=f" (titre : « {title} »)" if title else "",
                            chunk=CHUNK, transcript=build_transcript(segments))
-    answer = ask_llm(prompt)
+    answer = ask_llm(prompt, key=key)
     match = re.search(r"\{.*\}", answer, re.S)
     if not match:
         raise ValueError(f"Réponse LLM illisible : {answer[:200]}")
@@ -136,10 +138,11 @@ def detect_heuristic(segments: list[dict], duration: float, coverage: float = 1.
     return start, end, "Heuristique : plus longue zone de parole continue"
 
 
-def detect_sermon(segments: list[dict], duration: float, title: str | None, log, use_ai: bool) -> tuple[float, float, str]:
+def detect_sermon(segments: list[dict], duration: float, title: str | None, log, use_ai: bool,
+                  key: str | None = None) -> tuple[float, float, str]:
     if use_ai:
         try:
-            start, end, note = detect_with_llm(segments, title)
+            start, end, note = detect_with_llm(segments, title, key)
             if 0 <= start < end <= duration + 5 and end - start >= 120:
                 return start, min(end + CHUNK, duration), note  # la ligne citée dure CHUNK s : la fin est dedans
             log(f"Bornes IA incohérentes ({start}–{end}), passage à l'heuristique")

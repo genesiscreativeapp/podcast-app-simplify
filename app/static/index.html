@@ -38,11 +38,13 @@
       <div class="status" id="statusBar"></div>
       <label class="parallel" id="parallelBox" title="Nombre de traitements menés en même temps ; les autres attendent en file" hidden>Parallèle
         <select id="parallelSelect"></select></label>
+      <button class="icon-btn tour-btn" id="tourBtn" type="button" title="Revoir le tutoriel" aria-label="Revoir le tutoriel"><span data-ic="help"></span><span class="tour-label">Tutoriel</span></button>
       <button class="icon-btn theme-btn" data-theme-toggle type="button" aria-label="Changer de thème"></button>
       <div class="user-menu">
         <button class="user-btn" id="userBtn"><span class="avatar" id="userAvatar"></span><span id="userName"></span></button>
         <div class="menu" id="userMenu" hidden>
-          <button data-user="password"><span data-ic="key"></span> Changer mon mot de passe</button>
+          <button data-user="ai" id="menuAi" hidden><span data-ic="sparkle"></span> Mon IA (clé Anthropic)</button>
+          <button data-user="profile"><span data-ic="edit"></span> Mon profil (nom, mot de passe)</button>
           <button data-user="logout"><span data-ic="logout"></span> Se déconnecter</button>
         </div>
       </div>
@@ -252,5 +254,6 @@
   <div id="ctxMenu" class="ctx" hidden></div>
   <div id="toasts" class="toasts"></div>
   <script src="/static/app.js"></script>
+  <script src="/static/tour.js"></script>
 </body>
 </html>

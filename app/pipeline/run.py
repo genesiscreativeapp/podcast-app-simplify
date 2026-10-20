@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .. import config, r2sync, storage
-from ..db import Folder, Job, SessionLocal, ai_enabled, resolve_intro
+from ..db import Folder, Job, SessionLocal, ai_for, resolve_intro
 from ..utils import fmt_time
 from . import audio, steps
 from .detect import detect_sermon
@@ -65,7 +65,7 @@ def run_job(job_id: int) -> None:
         job = s.get(Job, job_id)
         folder = s.get(Folder, job.folder_id)
         intro = resolve_intro(s, folder, job.intro_id)
-        use_ai = ai_enabled(s)  # décidé au démarrage : tout le traitement suit le même choix
+        use_ai, ai_key = ai_for(s, job.created_by)  # décidé au démarrage : tout le traitement suit le même choix
         url, title, date, filename = job.youtube_url, job.title, job.date, job.filename
         known_title = job.video_title
         start_ov, end_ov = job.start_override, job.end_override
@@ -108,9 +108,11 @@ def run_job(job_id: int) -> None:
             audio.to_whisper(src, wav16, duration, rep.sub("detect", 0.0, 0.1))
             segs = transcribe_sampled(wav16, duration, rep.sub("detect", 0.1, 1.0))
             wav16.unlink(missing_ok=True)
-            if config.LLM_PROVIDER in ("anthropic", "openai") and not use_ai:
-                rep.log("IA désactivée par l'administrateur : repérage par heuristique")
-            start, end, note = detect_sermon(segs, duration, video_title or title, rep.log, use_ai)
+            if not use_ai:
+                rep.log("IA désactivée : repérage par heuristique")
+            elif ai_key:
+                rep.log("IA : clé Anthropic personnelle de l'utilisateur")
+            start, end, note = detect_sermon(segs, duration, video_title or title, rep.log, use_ai, ai_key)
         if end - start < 30:
             raise RuntimeError(f"Prédication trop courte détectée ({start:.0f}s → {end:.0f}s)")
         rep._update(sermon_start=start, sermon_end=end, detection_note=note)
@@ -147,7 +149,7 @@ def run_job(job_id: int) -> None:
         extra_cuts, offtopic_note = [], ""
         if offtopic_on:
             rep.step("clean")
-            extra_cuts, offtopic_note, ok = find_offtopic(segs, rep.log)
+            extra_cuts, offtopic_note, ok = find_offtopic(segs, rep.log, ai_key)
             if not ok and (pad_b or pad_a):
                 # l'IA n'a pas répondu : on revient exactement aux bornes repérées, sans la marge
                 extra_cuts = [(0.0, pad_b), *(tail_cut or [(total - pad_a, total)])]

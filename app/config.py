@@ -35,6 +35,8 @@ KEEP_SOURCES = int(_env("KEEP_SOURCES", "5"))  # nombre d'audios YouTube gardés
 APP_USER = _env("APP_USER", "admin")
 APP_PASSWORD = _env("APP_PASSWORD")
 SESSION_DAYS = int(_env("SESSION_DAYS", "14"))
+# Chiffre les clés d'API personnelles des utilisateurs. Vide : une clé est générée dans data/secret.key.
+SECRET_KEY = _env("SECRET_KEY")
 
 # --- Téléchargement YouTube -----------------------------------------------
 YTDLP_COOKIES = _env("YTDLP_COOKIES")  # chemin vers cookies.txt (si YouTube bloque l'IP)

@@ -23,6 +23,8 @@ PERMISSIONS = {
     "folders.manage": "Créer, renommer et supprimer des dossiers",
     "intros.manage": "Gérer la bibliothèque d'intros",
     "settings.manage": "Régler le nombre de traitements en parallèle",
+    "ai.key": "Utiliser sa propre clé Anthropic pour l'IA",
+    "ai.toggle": "Activer ou désactiver l'IA pour ses traitements",
 }
 
 
