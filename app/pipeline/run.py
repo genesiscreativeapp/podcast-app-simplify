@@ -185,9 +185,9 @@ def _condense(rep: Reporter, jb, words, extra_cuts, llm: dict | None) -> dict | 
         return None
     prop = condense.propose(sents, jb.pct, llm, rep.log, rep.tokens)
     rep.log(f"Condensation visée : −{jb.pct} % ({fmt_time(prop['target_s'])}) ; proposé : {len(prop['removed'])} phrase(s), "
-            f"{fmt_time(prop['saved_s'])} soit −{100 * prop['saved_s'] / max(prop['total_s'], 1):.0f} % — {prop['method']}")
+            f"{fmt_time(prop['saved_s'])} soit −{100 * prop['saved_s'] / max(prop['total_s'], 1):.0f} % — {prop['method']} ; idées conservées : {100 * prop['coverage']:.0f} %")
     return {"pct": jb.pct, "method": prop["method"], "target_s": prop["target_s"], "total_s": prop["total_s"], "saved_s": prop["saved_s"],
-            "key_points": prop["key_points"], "sentences": sents,
+            "coverage": prop["coverage"], "key_points": prop["key_points"], "sentences": sents,
             "removed": [{"id": i, **r} for i, r in prop["removed"].items()], "chosen": list(prop["removed"])}
 
 

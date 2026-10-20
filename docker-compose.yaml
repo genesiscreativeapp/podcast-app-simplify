@@ -71,13 +71,12 @@ services:
 
   # Optionnel : calcule la VERSION ANGLAISE des podcasts (traduction + voix du prédicateur) et les essais de l'écran « Voix anglaise »
   # (PyTorch, Chatterbox, traducteur local : image de plusieurs Go).
-  # Non démarré par défaut. Pour l'activer : COMPOSE_PROFILES=voicelab (Coolify : Environment Variables), puis redéployez ;
-  # en local : docker compose --profile voicelab up -d --build
+  # Démarré avec le reste. Sa construction est longue la première fois (plusieurs Go) ; s'il échoue, l'application continue de fonctionner
+  # et l'écran « Voix anglaise » indique qu'il n'est pas actif : regardez alors le journal de construction ou d'exécution de ce service.
   voicelab:
     build:
       context: .
       dockerfile: Dockerfile.voicelab
-    profiles: ["voicelab"]
     restart: unless-stopped
     environment: *env
     volumes:

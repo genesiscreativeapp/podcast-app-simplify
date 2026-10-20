@@ -74,7 +74,8 @@ j, work = job(1), config.WORK_DIR / "1"
 assert j.status == "review" and j.step.startswith("À valider") and j.review_ok is False and j.local_mp3 is None
 assert (work / "analysis.json").exists() and (work / "clean.wav").exists()       # de quoi reprendre sans rien refaire
 rev = json.loads(j.review_json)
-assert {r["id"] for r in rev["removed"]} == {70, 74, 80} and rev["chosen"] == [70, 74, 80] and rev["method"] == "heuristique"
+assert {70, 74, 80} <= {r["id"] for r in rev["removed"]} and rev["chosen"] == [r["id"] for r in rev["removed"]] and rev["method"] == "heuristique"
+assert rev["saved_s"] >= rev["target_s"] and 0 < rev["coverage"] <= 1
 assert len(rev["sentences"]) == N and rev["key_points"] is None and rev["pct"] == 10
 assert abs(j.progress - R.steps.BY_KEY["condense"][2]) < 1e-9 and "En attente de la validation" in j.log
 
@@ -100,11 +101,12 @@ with SessionLocal() as s:
 new_job(2, 10, "auto")
 R.run_job(2)
 j = job(2)
-assert j.status == "done" and "condensation : 3 phrase(s) retirée(s)" in j.edit_note and "validée" not in j.edit_note
-assert json.loads(j.review_json)["chosen"] == [70, 74, 80]                         # les coupes appliquées restent consultables
-assert len(json.loads(j.transcript_json)) == N - 3                            # les trois phrases retirées ne sont plus dans le texte
+assert j.status == "done" and "condensation : " in j.edit_note and "validée" not in j.edit_note
+chosen3 = json.loads(j.review_json)["chosen"]
+assert {70, 74, 80} <= set(chosen3)                                              # les coupes appliquées restent consultables
+assert len(json.loads(j.transcript_json)) == N - len(chosen3)                     # les phrases retirées ne sont plus dans le texte
 b2, a2 = seconds(j.edit_note)
-assert before - after < b2 - a2 <= 11
+assert before - after < b2 - a2
 
 # 4. sans condensation : rien ne change
 new_job(3, 0, "auto")

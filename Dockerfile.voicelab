@@ -1,5 +1,5 @@
 # Service optionnel « voicelab » : calcule la version anglaise des podcasts (traduction + voix du prédicateur) et les essais de l'écran « Voix anglaise ».
-# Image à part : PyTorch et les modèles pèsent plusieurs Go. Python 3.11, la version sur laquelle Chatterbox est testé.
+# Image à part : PyTorch et les modèles pèsent plusieurs Go (le service est démarré avec l'application ; voir docker-compose.yaml). Python 3.11, la version sur laquelle Chatterbox est testé.
 FROM python:3.11-slim
 
 RUN apt-get update \

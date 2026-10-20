@@ -371,12 +371,12 @@ class RetryIn(BaseModel):
     english_translator: str | None = None
 
 
-CONDENSE_PCT = (0, 10, 20, 30)
+CONDENSE_PCT = (0, 10, 20, 30, 40, 50, 60, 70, 80)
 
 
 def _check_condense(pct: int, mode: str) -> tuple[int, str]:
     if pct not in CONDENSE_PCT:
-        raise HTTPException(400, "Réduction de la durée : 0, 10, 20 ou 30 %")
+        raise HTTPException(400, "Réduction de la durée : 0, 10, 20, 30, 40, 50, 60, 70 ou 80 %")
     if mode not in ("auto", "review"):
         raise HTTPException(400, "Validation des coupes : automatique ou manuelle")
     return pct, mode
@@ -664,7 +664,8 @@ def _review_job(s, a: Access, job_id: int) -> tuple[Job, dict]:
 def get_review(job_id: int, s=Depends(db), a: Access = Depends(acl)):
     """Phrases, coupes proposées (avec la raison) et points clés, pour que l'utilisateur décide de ce qui part."""
     job, rv = _review_job(s, a, job_id)
-    return {"title": job.title, **{k: rv[k] for k in ("pct", "method", "target_s", "total_s", "saved_s", "key_points", "sentences", "removed", "chosen")}}
+    return {"title": job.title, "coverage": rv.get("coverage"),
+            **{k: rv[k] for k in ("pct", "method", "target_s", "total_s", "saved_s", "key_points", "sentences", "removed", "chosen")}}
 
 
 class ReviewIn(BaseModel):
@@ -1333,12 +1334,17 @@ BENCH_DIR = config.DATA_DIR / "bench"
 BENCH_FILE = re.compile(r"[A-Za-z0-9_-]+\.(wav|txt)")
 
 
+def _voicelab_seen(s) -> datetime | None:
+    try:
+        return datetime.fromisoformat(setting(s, "voicelab_seen"))
+    except ValueError:
+        return None
+
+
 def _voicelab_alive(s) -> bool:
     """Le service signale sa présence toutes les 5 s (même pendant un long calcul)."""
-    try:
-        return (datetime.utcnow() - datetime.fromisoformat(setting(s, "voicelab_seen"))).total_seconds() < 20
-    except ValueError:
-        return False
+    seen = _voicelab_seen(s)
+    return bool(seen) and (datetime.utcnow() - seen).total_seconds() < 20
 
 
 def _run_dict(r: VoiceBench, full_log: bool = False) -> dict:
@@ -1352,7 +1358,8 @@ def _run_dict(r: VoiceBench, full_log: bool = False) -> dict:
 def voicelab(s=Depends(db)):
     jobs = (s.query(Job).filter(Job.status == "done", Job.deleted_at.is_(None), Job.local_mp3.isnot(None))
             .order_by(Job.id.desc()).limit(60).all())
-    return {"alive": _voicelab_alive(s),
+    seen = _voicelab_seen(s)
+    return {"alive": _voicelab_alive(s), "last_seen": seen.isoformat() + "Z" if seen else None,
             "engines": [{"id": k, "label": v[0], "note": v[1]} for k, v in REAL_ENGINES.items()],
             "podcasts": [{"id": j.id, "title": j.title, "date": j.date, "seconds": j.duration_output or 0,
                           "folder": " / ".join(folder_path(s, s.get(Folder, j.folder_id))) if s.get(Folder, j.folder_id) else ""}

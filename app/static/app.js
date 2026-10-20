@@ -2,7 +2,7 @@
 // Studio Podcast — interface
 // ============================================================================
 const state = {
-  me: null, folders: [], intros: [], current: null, view: "home",
+  detailTab: "podcast", me: null, folders: [], intros: [], current: null, view: "home",
   jobs: [], hist: { items: [], total: 0 }, home: { sig: "", q: null }, detail: null, users: [],
   expanded: new Set(), lastActive: 0, timers: {}, aiUsers: [],
 };
@@ -271,6 +271,7 @@ function route() {
 }
 
 async function go(view, id = null) {
+  miniAdopt();  // un son en cours continue dans le mini-lecteur
   state.view = view;
   state.current = view === "folders" ? id : null;
   const hash = view === "folders" ? (id ? String(id) : "folders") : view;
@@ -344,7 +345,65 @@ function makePlayer(id, autoplay, lang = "fr") {
 // L'événement « play » ne remonte pas dans le DOM : on l'écoute en phase de capture.
 document.addEventListener("play", (e) => {
   document.querySelectorAll("audio").forEach((a) => { if (a !== e.target) a.pause(); });
+  if (mini.audio && e.target !== mini.audio) miniClose();  // un autre son démarre : le mini-lecteur s'efface
 }, true);
+
+// ---------- Mini-lecteur : un son en cours ne s'arrête pas quand on quitte la page ou la fenêtre ----------
+// Il apparaît en haut à droite de la page (dans son conteneur, pas dans l'en-tête) tant que le son n'est pas en pause,
+// sauf dans l'éditeur de rognage, qui a son propre lecteur.
+const mini = { audio: null, ac: null };
+const mmss2 = (s) => (isFinite(s) ? `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}` : "0:00");
+function miniTitle(a) {
+  const lang = a.dataset.lang === "en" ? " (anglais)" : "";
+  if (a.closest("#detailDialog")) return $("detailTitle").textContent + lang;
+  const row = a.closest(".hrow");
+  if (row) return (row.querySelector(".job-title")?.childNodes[0]?.textContent.trim() || "Podcast") + lang;
+  return a.closest(".card, .item")?.querySelector("b")?.textContent.trim() || "Lecture en cours";
+}
+function miniClose() {
+  mini.ac?.abort();
+  if (mini.audio) { mini.audio.pause(); mini.audio.remove(); }
+  mini.audio = mini.ac = null;
+  $("miniPlayer").hidden = true;
+  $("miniPlayer").innerHTML = "";
+}
+function miniAdopt() {  // appelé quand on quitte : fermeture des détails, changement de page
+  if (document.body.classList.contains("trimming")) return;
+  const a = [...document.querySelectorAll("audio")].find((x) => x.isConnected && !x.paused && !x.ended && !x.dataset.editor && !x.closest("#miniPlayer"));
+  if (!a) return;
+  miniClose();
+  const box = $("miniPlayer"), id = a.dataset.job;
+  box.innerHTML = `<div class="mp-top"><b class="mp-title" title="${esc(miniTitle(a))}">${esc(miniTitle(a))}</b>
+      ${id ? `<button type="button" class="icon-btn" data-mp="open" title="Ouvrir les détails" aria-label="Ouvrir les détails">↗</button>` : ""}
+      <button type="button" class="icon-btn" data-mp="close" title="Fermer" aria-label="Fermer">✕</button></div>
+    <div class="mp-bar"><button type="button" class="icon-btn mp-play" data-mp="toggle" aria-label="Pause">⏸</button>
+      <input type="range" class="mp-seek" min="0" max="1000" value="0" aria-label="Position"><span class="mp-time">0:00 / 0:00</span></div>`;
+  const was = !a.paused;
+  a.controls = false;
+  box.appendChild(a);  // déplacé sans être recréé : la lecture continue
+  box.hidden = false;
+  if (was && a.paused) a.play().catch(() => {});  // filet : certains navigateurs mettent en pause un média déplacé
+  mini.audio = a;
+  mini.ac = new AbortController();
+  const sig = { signal: mini.ac.signal }, seek = box.querySelector(".mp-seek"), time = box.querySelector(".mp-time"), btn = box.querySelector(".mp-play");
+  const paint = () => {
+    if (!seek.matches(":active")) seek.value = a.duration ? Math.round((1000 * a.currentTime) / a.duration) : 0;
+    time.textContent = `${mmss2(a.currentTime)} / ${mmss2(a.duration)}`;
+    btn.textContent = a.paused ? "▶" : "⏸";
+    btn.setAttribute("aria-label", a.paused ? "Lecture" : "Pause");
+  };
+  ["timeupdate", "play", "pause", "loadedmetadata", "durationchange"].forEach((ev) => a.addEventListener(ev, paint, sig));
+  a.addEventListener("ended", miniClose, sig);
+  seek.oninput = () => { if (a.duration) a.currentTime = (seek.value / 1000) * a.duration; };
+  paint();
+}
+$("miniPlayer").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-mp]");
+  if (!b || !mini.audio) return;
+  if (b.dataset.mp === "toggle") mini.audio.paused ? mini.audio.play() : mini.audio.pause();
+  else if (b.dataset.mp === "close") miniClose();
+  else if (b.dataset.mp === "open") openDetail(+mini.audio.dataset.job);
+});
 const loadingLine = (box) => (box.innerHTML = '<div class="loading-line"><span class="spinner"></span> Chargement…</div>');
 
 const STEP_ICON = { done: "✓", active: "●", pending: "○", skipped: "–", error: "!" };
@@ -553,7 +612,7 @@ async function retryDialog(job) {
       <label>Intro<select name="intro_id">${introOptions([["keep", "Ne pas changer"], ["", "Automatique (dossier, sinon par défaut)"]], true, "keep")}</select></label>
       ${state.me.is_admin ? `<label>IA utilisée<select name="ai_user">${aiOptions([["keep", "Ne pas changer"]], "keep")}</select></label>` : ""}
       <div class="row"><label>Durée du podcast<select name="condense_pct">
-          ${[["keep", "Ne pas changer"], ["0", "Durée d'origine"], ["10", "Raccourcir d'environ 10 %"], ["20", "Raccourcir d'environ 20 %"], ["30", "Raccourcir d'environ 30 %"]]
+          ${[["keep", "Ne pas changer"], ["0", "Durée d'origine"], ["10", "Raccourcir d'environ 10 %"], ["20", "Raccourcir d'environ 20 %"], ["30", "Raccourcir d'environ 30 %"], ["40", "Raccourcir d'environ 40 %"], ["50", "Raccourcir d'environ 50 %"], ["60", "Raccourcir d'environ 60 %"], ["70", "Raccourcir d'environ 70 %"], ["80", "Raccourcir d'environ 80 %"]]
             .map(([v, l]) => `<option value="${v}" ${v === "keep" ? "selected" : ""}>${l}</option>`).join("")}</select></label>
         <label>Coupes proposées<select name="condense_mode"><option value="keep" selected>Ne pas changer</option>
           <option value="auto">Les appliquer automatiquement</option><option value="review">Me les montrer avant (je valide)</option></select></label></div>
@@ -645,7 +704,7 @@ async function reviewDialog(job) {
     onMount: (dlg) => {
       const list = dlg.querySelector("#rvList"), sum = () => {
         const s = saved();
-        dlg.querySelector("#rvSum").textContent = `${chosen.size} phrase(s) · −${mmss(s)} (−${(100 * s / Math.max(rv.total_s, 1)).toFixed(0)} %, objectif −${rv.pct} %)`;
+        dlg.querySelector("#rvSum").textContent = `${chosen.size} phrase(s) · −${mmss(s)} (−${(100 * s / Math.max(rv.total_s, 1)).toFixed(0)} %, objectif −${rv.pct} %)${rv.coverage != null ? ` · idées conservées : ${Math.round(100 * rv.coverage)} % (avant vos changements)` : ""}`;
       };
       sum();
       dlg.querySelector("#rvOnly").onchange = (e) => list.classList.toggle("only", e.target.checked);
@@ -680,10 +739,12 @@ const parseClock = (v) => { const p = String(v).trim().split(":"); if (!v.trim()
 
 async function trimDialog(job) {
   const dur = job.duration_output_s || 0;
+  miniClose();  // l'éditeur a son propre lecteur : pas de mini-lecteur pendant le rognage
+  document.body.classList.add("trimming");
   const res = await modal({
     title: "Rogner le podcast", wide: true,
     body: `<p>Retirez le début et/ou la fin du podcast terminé (par exemple un silence, un chant ou une annonce en trop). Écoutez, placez le curseur au bon endroit, puis cliquez « Marquer ici ».</p>
-      <div class="trim-player"><audio controls preload="metadata" src="/api/jobs/${job.id}/file/mp3?v=${Date.now()}"></audio></div>
+      <div class="trim-player"><audio controls preload="metadata" data-editor src="/api/jobs/${job.id}/file/mp3?v=${Date.now()}"></audio></div>
       <div class="trim-marks">
         <div class="mark"><b>Début conservé</b><input name="start" value="0:00:00.0" autocomplete="off">
           <div class="actions"><button class="btn small ghost" type="button" data-mark="start">Marquer ici</button>
@@ -730,6 +791,7 @@ async function trimDialog(job) {
       return "trimmed";
     },
   });
+  document.body.classList.remove("trimming");
   if (res === "trimmed") toast("Podcast rogné", "ok");
   else if (res === "restore") {
     if (!(await confirmBox({ title: "Restaurer l'original ?", message: "Le podcast reviendra à sa version d'avant le rognage." + (job.on_r2 ? " Le lien R2 changera." : ""), confirmLabel: "Restaurer" }))) return;
@@ -1783,10 +1845,10 @@ function enBlock(j, admin) {
   else if (e.status === "running") body = `<div class="progress"><div style="width:${Math.round(e.progress * 100)}%"></div></div><div class="step"><b>${Math.round(e.progress * 100)} %</b> — ${esc(e.step)}</div>`;
   else if (e.status === "review") body = `<div class="review-note"><span>✋ Le texte anglais attend votre relecture : la voix du prédicateur le dira tel quel.</span>${can_ ? `<button class="btn small" data-act="enreview" data-id="${j.id}">${ic("edit")} Relire le texte</button>` : ""}</div>`;
   else if (e.status === "error") body = `<div class="err-box">${esc(e.error || "Erreur")}</div>`;
-  else body = `<div data-player="${j.id}" data-lang="en"></div>`;
+  else body = `<div class="player-row"><div data-player="${j.id}" data-lang="en"></div>
+      ${e.has_mp3 ? `<a class="btn small" href="/api/jobs/${j.id}/english/file?download=true">${ic("download")} Télécharger MP3 anglais</a>` : ""}</div>`;
   return `${body}<p class="hint">${esc(meta)}</p>
     <div class="actions">
-      ${e.has_mp3 ? `<a class="btn small" href="/api/jobs/${j.id}/english/file?download=true">⬇ Télécharger MP3 anglais</a>` : ""}
       ${e.on_r2 ? `<button class="btn small ghost" data-act="enlink" data-id="${j.id}">${ic("link")} Copier le lien R2</button>` : ""}
       ${can_ && e.status !== "running" ? `<button class="btn small ghost" data-act="english" data-id="${j.id}">${ic("retry")} ${e.status === "done" ? "Régénérer…" : "Relancer…"}</button>` : ""}
       ${admin && e.status !== "running" ? `<button class="btn small ghost danger" data-act="endelete" data-id="${j.id}">${ic("trash")} Supprimer</button>` : ""}
@@ -1794,11 +1856,20 @@ function enBlock(j, admin) {
     ${admin && j.english_log ? `<details class="log"><summary>Journal de la version anglaise</summary><pre class="detail-log">${esc(j.english_log)}</pre></details>` : ""}`;
 }
 
+$("detailBody").addEventListener("click", (e) => {
+  const t = e.target.closest("[data-dtab]");
+  if (!t) return;
+  state.detailTab = t.dataset.dtab;
+  $("detailBody").querySelectorAll("[data-dtab]").forEach((b) => { const on = b === t; b.classList.toggle("active", on); b.setAttribute("aria-selected", on); });
+  $("detailBody").querySelectorAll("[data-dpane]").forEach((p) => (p.hidden = p.dataset.dpane !== state.detailTab));
+});
+
 async function openDetail(id, silent = false) {
   const j = await api(`/api/jobs/${id}`).catch((err) => { if (!silent) toast(err.message, true); return null; });
   if (!j || (silent && !$("detailDialog").open)) return;  // rafraîchissement tardif : la fenêtre a été fermée entre-temps
   state.detail = j;
   const dlg = $("detailDialog");
+  if (!silent && !dlg.open) state.detailTab = "podcast";  // une nouvelle ouverture repart du premier onglet
   const logOpen = dlg.querySelector("details.log")?.open;
   const keepAudio = { fr: dlg.querySelector('audio[data-lang="fr"]'), en: dlg.querySelector('audio[data-lang="en"]') };  // un son en cours n'est pas coupé
   $("detailTitle").textContent = j.title;
@@ -1808,23 +1879,27 @@ async function openDetail(id, silent = false) {
       <input readonly value="${esc(j.links.mp3)}" onfocus="this.select()">
       <button class="btn small" data-copy="mp3">Copier</button>
       <a class="btn small ghost" href="${esc(j.links.mp3)}" target="_blank" rel="noopener">Ouvrir</a></div>` : "";
+  const showEn = !!(j.english || canEnglish(j));
+  const tabs = [["podcast", "Podcast"], ...(showEn ? [["english", "Version anglaise" + (j.english ? ` · ${EN_LABEL[j.english.status]}` : "")]] : []), ["info", "Informations"], ...(admin ? [["steps", "Étapes et journal"]] : [])];
+  if (!tabs.some(([k]) => k === state.detailTab)) state.detailTab = "podcast";
+  const pane = (k, html) => `<div data-dpane="${k}" ${state.detailTab === k ? "" : "hidden"}>${html}</div>`;
   $("detailBody").innerHTML = `
     <div class="job-top"><div class="job-sub">${ic("folder")} ${esc(j.folder_path)}</div>
       ${can("folders.manage") && editable(j) ? `<button class="btn small ghost" data-act="rename" data-id="${j.id}">${ic("edit")} Renommer</button>` : ""}
-      <span class="badge ${j.status}">${LABELS[j.status]}</span></div>
+      <span class="badge ${j.status}">${LABELS[j.status]}</span> ${enBadge(j)}</div>
     ${liveBlock(j)}
     ${j.status === "review" && can("jobs.create") && editable(j) ? `<div class="review-note"><span>✋ Des coupes de condensation attendent votre validation.</span>
       <button class="btn small" data-act="review" data-id="${j.id}">${ic("scissors")} Relire les coupes</button></div>` : ""}
     ${j.error ? `<div class="err-box">${esc(j.error)}</div>` : ""}
-    ${j.has_mp3 || link ? `<div class="d-title">Écouter et télécharger</div>
-      ${j.has_mp3 ? `<div data-player="${j.id}" data-auto></div>` : ""}
-      <div class="actions">${j.has_mp3 ? `<a class="btn small" href="/api/jobs/${j.id}/file/mp3?download=true">⬇ Télécharger MP3</a>` : ""}</div>` : ""}
-    ${link ? `<div class="d-title">Lien direct de partage (R2)</div>${link}
-      <p class="hint">${j.links_public ? "Lien public permanent."
-        : `Lien signé valable ${j.links_days} jours, regénéré à chaque ouverture de cette fenêtre. Pour des liens permanents, configurez R2_PUBLIC_BASE_URL.`}</p>` : ""}
-    ${j.english || canEnglish(j) ? `<div class="d-title">Version anglaise</div>${enBlock(j, admin)}` : ""}
-    <div class="d-title">Informations</div>
-    <dl class="kv">
+    <div class="tabs" role="tablist" aria-label="Détails du traitement">${tabs.map(([k, l]) =>
+      `<button type="button" role="tab" data-dtab="${k}" class="${state.detailTab === k ? "active" : ""}" aria-selected="${state.detailTab === k}">${esc(l)}</button>`).join("")}</div>
+    ${pane("podcast", `${j.has_mp3 ? `<div class="player-row"><div data-player="${j.id}" data-auto></div>
+        <a class="btn small" href="/api/jobs/${j.id}/file/mp3?download=true">${ic("download")} Télécharger MP3</a></div>` : '<p class="hint">Pas encore de fichier audio.</p>'}
+      ${link ? `<div class="d-title">Lien direct de partage (R2)</div>${link}
+        <p class="hint">${j.links_public ? "Lien public permanent."
+          : `Lien signé valable ${j.links_days} jours, regénéré à chaque ouverture de cette fenêtre. Pour des liens permanents, configurez R2_PUBLIC_BASE_URL.`}</p>` : ""}`)}
+    ${showEn ? pane("english", enBlock(j, admin)) : ""}
+    ${pane("info", `<dl class="kv">
       ${row("Fichier", esc(j.display_filename))}
       ${admin ? `${row("Intro", esc(j.intro_name))}
       ${row("IA utilisée", esc(aiLabel(j)))}
@@ -1842,11 +1917,10 @@ async function openDetail(id, silent = false) {
       ${row("Créé par", esc(j.created_by || ""))}
       ${row("Créé le", fmtDate(j.created_at))}
       ${row("Terminé le", j.finished_at ? fmtDate(j.finished_at) : "")}
-    </dl>
-    ${admin ? `<div class="d-title">Étapes</div>
-    ${renderSteps(j, true)}
-    <details class="log" ${logOpen ? "open" : ""}><summary>Journal complet</summary>
-      <pre class="detail-log">${esc(j.log || "(vide)")}</pre></details>` : ""}
+    </dl>`)}
+    ${admin ? pane("steps", `${renderSteps(j, true)}
+      <details class="log" ${logOpen ? "open" : ""}><summary>Journal complet</summary>
+        <pre class="detail-log">${esc(j.log || "(vide)")}</pre></details>`) : ""}
     <div class="dialog-foot">
       ${j.status === "done" && j.has_mp3 && can("jobs.trim") && editable(j) ? `<button class="btn ghost" data-act="trim" data-id="${j.id}">${ic("scissors")} Rogner</button>` : ""}
       ${(j.status === "done" || j.status === "error") && can("jobs.create") && editable(j) ? `<button class="btn ghost" data-act="retry" data-id="${j.id}">Relancer</button>` : ""}
@@ -1863,7 +1937,7 @@ $("detailBody").addEventListener("click", (e) => {
   if (b) copyLink(state.detail.links[b.dataset.copy]);
 });
 $("detailClose").onclick = () => $("detailDialog").close();
-$("detailDialog").addEventListener("close", () => { state.detail = null; });
+$("detailDialog").addEventListener("close", () => { state.detail = null; miniAdopt(); });
 
 // ---------- Utilisateurs (administrateur) ----------
 async function loadUsers() {
@@ -2097,9 +2171,13 @@ async function loadVoice(silent = false) {
   const d = voice.data, en = voice.en;
   state.enAlive = d.alive;
   $("voiceStatus").innerHTML = d.alive
-    ? '<span class="pill on">Service voicelab actif</span> <span class="hint">Les essais sont calculés sur ce serveur, l\'un après l\'autre.</span>'
-    : `<span class="pill off">Service voicelab arrêté</span>
-       <p class="hint">Les modèles de voix (PyTorch, plusieurs Go) tournent dans un service à part, <b>non démarré par défaut</b>. Pour l'activer, ajoutez la variable <code>COMPOSE_PROFILES=voicelab</code> (Coolify : Environment Variables) puis redéployez ; en local : <code>docker compose --profile voicelab up -d --build</code>. Le premier essai télécharge les modèles. Les essais lancés ci-dessous attendent que le service démarre.</p>`;
+    ? '<span class="pill on">Service voicelab actif</span> <span class="hint">Les versions anglaises et les essais sont calculés sur ce serveur, l\'un après l\'autre.</span>'
+    : `<span class="pill off">${d.last_seen ? "Service voicelab arrêté" : "Service voicelab jamais démarré"}</span>
+       ${d.last_seen ? `<span class="hint">Dernier signe de vie : ${fmtDate(d.last_seen)}.</span>` : ""}
+       <p class="hint">Les modèles de voix (PyTorch, plusieurs Go) tournent dans un service à part, <code>voicelab</code>, démarré avec l'application. ${d.last_seen
+         ? "Il s'est arrêté : regardez son journal d'exécution (Coolify : le service voicelab, Logs)."
+         : "S'il n'a jamais donné signe de vie, sa construction ou son démarrage a échoué ou n'est pas terminé (la première construction dure longtemps) : regardez le journal de construction puis d'exécution du service <code>voicelab</code> (Coolify : Logs) et redéployez."}
+       Tant qu'il est arrêté, les demandes restent « en attente ».</p>`;
   const sig = d.podcasts.map((p) => p.id).join(",") + "|" + d.engines.map((e) => e.id).join(",") + "|" + JSON.stringify(en.defaults) + en.claude_available;
   if (sig !== voice.sig) {
     const tr = (sel) => Object.entries(en.translators).map(([k, l]) => `<option value="${k}" ${k === sel ? "selected" : ""}>${esc(l)}${k === "claude" && !en.claude_available ? " — indisponible, le modèle local sera utilisé" : ""}</option>`).join("");

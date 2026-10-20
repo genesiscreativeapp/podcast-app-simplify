@@ -45,10 +45,10 @@ with SessionLocal() as s:
 # --- l'écran est réservé à l'administrateur ; le service est « inactif » tant qu'il n'a pas donné signe de vie
 assert bob.get("/api/voicelab").status_code == 403 and bob.post("/api/voicelab/runs", json={}).status_code == 403
 v = ok(admin.get("/api/voicelab"))
-assert v["alive"] is False and [p["id"] for p in v["podcasts"]] == [1] and v["podcasts"][0]["folder"] == "CULTE"   # ni fichier absent, ni en cours
+assert v["alive"] is False and v["last_seen"] is None and [p["id"] for p in v["podcasts"]] == [1] and v["podcasts"][0]["folder"] == "CULTE"   # ni fichier absent, ni en cours
 assert [e["id"] for e in v["engines"]] == ["chatterbox-nano", "chatterbox-turbo", "chatterbox"] and v["runs"] == []
 voicelab.beat()
-assert ok(admin.get("/api/voicelab"))["alive"] is True
+assert ok(admin.get("/api/voicelab"))["alive"] is True and ok(admin.get("/api/voicelab"))["last_seen"].endswith("Z")
 
 # --- création d'un essai : tout est contrôlé
 body = {"job_id": 1, "start": 900, "seconds": 180, "ref_start": 5, "engines": ["chatterbox-nano"]}

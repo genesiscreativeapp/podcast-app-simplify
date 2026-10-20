@@ -1,14 +1,16 @@
-"""Condensation d'une prédication : retire des PHRASES ENTIÈRES (redites, formules creuses) pour la raccourcir,
-sans jamais changer l'ordre ni réécrire quoi que ce soit.
+"""Condensation d'une prédication : retire des PHRASES ENTIÈRES pour la raccourcir de 10 à 80 %, sans jamais changer l'ordre
+ni réécrire quoi que ce soit.
 
-- Sans IA : une heuristique (phrases dont le contenu a déjà été dit juste avant, formules de remplissage). Elle est prudente :
-  si elle ne trouve pas assez de redites sûres, elle coupe moins que demandé plutôt que de perdre du sens.
-- Avec une IA : elle choisit les phrases à retirer en lisant tout le texte ; si elle ne répond pas, ou coupe trop peu,
-  l'heuristique prend le relais.
-Dans tous les cas : le début et la fin (introduction, conclusion, prière), les lectures bibliques et les « Amen »
-sont protégés. L'audio est coupé aux limites des phrases (voir `cuts_for`).
+- Sans IA : on retire d'abord ce qui n'apporte aucune idée nouvelle (reprises d'une idée déjà dite, formules de remplissage), puis,
+  si l'objectif n'est pas atteint, les phrases dont la perte coûte le moins d'idées par seconde gagnée. Le texte qui reste garde
+  autant que possible toutes les idées du sermon (le résultat indique la part des idées conservée).
+- Avec une IA : elle choisit en lisant tout le texte ; si elle coupe trop peu, ou ne répond pas, l'heuristique complète.
+Dans tous les cas : le début et la fin (introduction, conclusion, prière), les lectures bibliques et les « Amen » sont protégés.
+L'audio est coupé aux limites des phrases (voir `cuts_for`).
 """
+import heapq
 import json
+import math
 import re
 import unicodedata
 from typing import Callable
@@ -19,10 +21,9 @@ from .detect import ask_llm
 BREAK_GAP = 1.0     # pause (s) qui termine une phrase même sans ponctuation
 MAX_WORDS = 45      # une phrase plus longue est coupée
 HEAD, TAIL = 60.0, 90.0   # secondes de début et de fin jamais touchées : introduction, conclusion, prière
-WINDOW = 25         # une redite est cherchée parmi les 25 phrases précédentes
-MIN_STEMS = 4       # une phrase de moins de 4 mots porteurs de sens n'est jamais jugée redondante
 AI_CHUNK = 500      # phrases envoyées par requête à l'IA
 AI_MARGIN = 1.15    # l'IA ne peut pas retirer plus de 115 % de l'objectif
+AI_MIN = 0.85       # en dessous de 85 % de l'objectif, l'heuristique complète le travail de l'IA
 
 STOP = set("""le la les un une des du de d l et ou mais donc or ni car que qui quoi dont ce cet cette ces se sa son ses ma mon mes ta
 ton tes notre nos votre vos leur leurs je tu il elle on nous vous ils elles me te lui y en a as ai ont est es sont suis sommes etes
@@ -30,7 +31,7 @@ etait ete etre avoir fait faire dit dire plus pas ne non oui si comme tout tous 
 dans par pour au aux cela ca ceci voila c j m n s t qu""".split())
 LITURGY = set("amen alleluia gloire hosanna merci jesus christ seigneur dieu louange a".split())
 SCRIPTURE = re.compile(
-    r"\b(versets?|chapitres?|psaumes?|ecritures?|la bible|evangile|epitres?|lisons|ouvrons|il est ecrit|est ecrit|parole de dieu)\b"
+    r"\b(versets?|chapitres?|psaumes?|ecritures?|la bible|epitres?|lisons|ouvrons|il est ecrit|est ecrit)\b"
     r"|\b(genese|exode|levitique|nombres|deuteronome|josue|juges|samuel|rois|chroniques|esdras|nehemie|esther|job|proverbes|ecclesiaste|"
     r"cantique|esaie|isaie|jeremie|lamentations|ezechiel|daniel|osee|joel|amos|abdias|jonas|michee|nahum|habacuc|sophonie|aggee|zacharie|"
     r"malachie|matthieu|marc|luc|jean|actes|romains|corinthiens|galates|ephesiens|philippiens|colossiens|thessaloniciens|timothee|tite|"
@@ -41,7 +42,8 @@ HOLLOW = re.compile(r"^(vous voyez|n est ce pas|voyez vous|vous comprenez|compre
 PROMPT = """Voici les phrases numérotées d'une prédication chrétienne en français{part}.
 
 Ta tâche : proposer des phrases ENTIÈRES à retirer pour raccourcir ce passage d'environ {pct} % (soit environ {seconds} secondes),
-SANS changer l'ordre et SANS perdre le sens du message.
+SANS changer l'ordre et en gardant le sens du message. Atteins l'objectif : si les redites ne suffisent pas, retire ensuite les passages
+les moins essentiels (détails, exemples secondaires, développements répétitifs), jamais un point principal.
 
 À retirer en priorité :
 - une idée déjà exprimée juste avant ou un peu plus haut (garde la formulation la plus claire ou la plus forte) ;
@@ -50,8 +52,7 @@ SANS changer l'ordre et SANS perdre le sens du message.
 
 Ne retire JAMAIS : les lectures et citations bibliques et la phrase qui annonce le texte, les points principaux (chaque idée garde au
 moins une phrase qui l'exprime), les illustrations nécessaires à la compréhension, la conclusion et la prière, les « Amen » et
-« Alléluia », ni les phrases marquées [PROTÉGÉ]. En cas de doute, ne retire pas : mieux vaut couper moins que perdre du sens.
-Si tu ne trouves pas assez de redites sûres, retire moins que l'objectif.
+« Alléluia », ni les phrases marquées [PROTÉGÉ]. Chaque idée principale garde au moins une phrase qui l'exprime.
 
 Réponds UNIQUEMENT avec un objet JSON, sans autre texte :
 {{"retirer": [{{"de": 12, "a": 14, "raison": "redit l'idée de la phrase 9"}}], "points_cles": ["…", "…"]}}
@@ -122,39 +123,57 @@ def protected_ids(sents: list[dict]) -> set[int]:
     return keep
 
 
-# --- Sans IA : redites et formules creuses ---------------------------------------------------------------------------
-def candidates(sents: list[dict], prot: set[int]) -> list[tuple[float, int, str, int | None]]:
-    """(confiance, phrase, raison, phrase déjà dite). Une redite : au moins 75 % des mots porteurs de sens de la phrase étaient déjà
-    dans l'une des 25 précédentes, de longueur comparable. On retire la reprise, jamais la première occurrence."""
-    st = [stems(s["text"]) for s in sents]
-    out = []
-    for i, s in enumerate(sents):
-        if i in prot:
-            continue
-        if HOLLOW.match(" ".join(_tokens(s["text"]))):
-            out.append((0.5, i, "formule de remplissage", None))
-            continue
-        if len(st[i]) < MIN_STEMS:
-            continue
-        for j in range(max(0, i - WINDOW), i):
-            inter = len(st[i] & st[j])
-            if len(st[j]) >= MIN_STEMS and inter / len(st[i]) >= 0.75 and inter / len(st[i] | st[j]) >= 0.45:
-                out.append((inter / len(st[i]) + (0.3 if j == i - 1 else 0.0), i, "redite", j))
-                break
-    return out
-
-
-def pick(sents: list[dict], cands, target_s: float, already: dict | None = None) -> dict[int, dict]:
-    """Les candidats les plus sûrs d'abord, jusqu'à l'objectif (jamais au-delà d'une phrase de plus)."""
+# --- Sans IA : on perd le moins d'idées possible par seconde gagnée -------------------------------------------------------
+def coverage_removal(sents: list[dict], prot: set[int], target_s: float, already: dict[int, dict] | None = None) -> tuple[dict[int, dict], float]:
+    """Retire des phrases jusqu'à l'objectif. À chaque pas, on retire la phrase qui coûte le moins d'idées par seconde gagnée : les idées
+    (mots porteurs de sens, pondérés par leur rareté dans le sermon) qu'aucune autre phrase conservée n'exprime. Une reprise d'une idée
+    déjà dite ne coûte rien et part la première, puis viennent les phrases de moins en moins originales. Les phrases protégées restent.
+    → (phrases retirées, part des idées conservée entre 0 et 1). L'objectif peut ne pas être atteint s'il ne reste que du protégé."""
+    n = len(sents)
+    terms = [set() if HOLLOW.match(" ".join(_tokens(s["text"]))) else stems(s["text"]) for s in sents]  # une formule creuse n'a aucune idée
+    df = {}
+    for t in terms:
+        for w in t:
+            df[w] = df.get(w, 0) + 1
+    idf = {w: math.log(1 + n / k) for w, k in df.items()}  # un mot rare pèse plus qu'un mot qui revient partout
+    count = dict(df)  # nombre de phrases conservées qui expriment chaque mot
+    where = {}
+    for i, t in enumerate(terms):
+        for w in t:
+            where.setdefault(w, []).append(i)
     removed = dict(already or {})
+    for i in removed:
+        for w in terms[i]:
+            count[w] -= 1
     saved = sum(duration(sents[i]) for i in removed)
-    for _score, i, why, because in sorted(cands, key=lambda c: -c[0]):
-        if saved >= target_s:
-            break
-        if i not in removed:
-            removed[i] = {"reason": why if because is None else f"{why} de la phrase {because}", "because": because, "by": "heuristique"}
-            saved += duration(sents[i])
-    return removed
+    loss = lambda i: sum(idf[w] for w in terms[i] if count[w] == 1)  # idées que cette phrase est seule à porter
+    heap = [(loss(i) / max(duration(sents[i]), 0.1), -i, i) for i in range(n) if i not in prot and i not in removed]  # à égalité : la reprise, pas l'original
+    heapq.heapify(heap)
+    while heap and saved < target_s:
+        ratio, _, i = heapq.heappop(heap)
+        now = loss(i) / max(duration(sents[i]), 0.1)
+        if now > ratio + 1e-12:  # des phrases retirées depuis ont rendu celle-ci plus précieuse : on la repose avec sa vraie valeur
+            heapq.heappush(heap, (now, -i, i))
+            continue
+        for w in terms[i]:
+            count[w] -= 1
+        # pour l'affichage : la phrase conservée qui exprime le plus de ses idées
+        best, best_w = None, 0.0
+        for j in {j for w in terms[i] for j in where[w]}:
+            if j != i and j not in removed:
+                w_ = sum(idf[w] for w in terms[i] & terms[j])
+                if w_ > best_w:
+                    best, best_w = j, w_
+        if not terms[i]:
+            why = "formule de remplissage"
+        elif now == 0:
+            why = f"reprise d'idées déjà dites (phrase {best})" if best is not None else "reprise d'idées déjà dites"
+        else:
+            why = "idées secondaires" + (f", proches de la phrase {best}" if best is not None and best_w > 0 else "")
+        removed[i] = {"reason": why, "because": best, "by": "heuristique"}
+        saved += duration(sents[i])
+    total_w = sum(idf.values()) or 1.0
+    return removed, sum(idf[w] for w, k in count.items() if k > 0) / total_w
 
 
 # --- Avec IA ------------------------------------------------------------------------------------------------------
@@ -205,12 +224,15 @@ def propose(sents: list[dict], pct: int, llm: dict | None, log: Callable[[str], 
             log(f"Condensation par l'IA impossible ({exc}) : passage à l'heuristique")
             removed = {}
     saved = sum(duration(sents[i]) for i in removed)
-    if not ai_ok or saved < 0.6 * target:  # sans IA, ou une IA trop timide : redites sûres en complément
-        removed = pick(sents, candidates(sents, prot), target, removed)
+    coverage = None
+    if not ai_ok or saved < AI_MIN * target:  # sans IA, ou une IA trop timide : l'heuristique complète jusqu'à l'objectif
+        removed, coverage = coverage_removal(sents, prot, target, removed)
         saved = sum(duration(sents[i]) for i in removed)
+    if coverage is None:  # part des idées conservée, pour juger de la perte
+        coverage = coverage_removal(sents, prot, 0.0, removed)[1]
     by = {r["by"] for r in removed.values()}
     method = "IA + heuristique" if by == {"IA", "heuristique"} else "IA" if by == {"IA"} or (ai_ok and not by) else "heuristique"
-    return {"method": method, "target_s": round(target, 1), "total_s": round(total, 1), "saved_s": round(saved, 1),
+    return {"method": method, "target_s": round(target, 1), "total_s": round(total, 1), "saved_s": round(saved, 1), "coverage": round(coverage, 3),
             "removed": {i: removed[i] for i in sorted(removed)}, "key_points": points}
 
 
