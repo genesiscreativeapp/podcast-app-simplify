@@ -133,6 +133,8 @@ class Job(Base):
     duration_source: Mapped[float | None] = mapped_column(Float, nullable=True)
     duration_output: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # IA d'un administrateur pour ce traitement : nom d'utilisateur dont on prend la configuration, AI_SERVER, ou NULL = celle de l'auteur
+    ai_user: Mapped[str | None] = mapped_column(String(60), nullable=True)
     tokens_in: Mapped[int] = mapped_column(Integer, default=0)   # tokens envoyés à l'IA pendant ce traitement
     tokens_out: Mapped[int] = mapped_column(Integer, default=0)  # tokens reçus de l'IA
 
@@ -164,7 +166,7 @@ def _init_db() -> None:
         for table, col, sql_type in (("jobs", "intro_id", "INTEGER"), ("folders", "intro_id", "INTEGER"),
                                      ("jobs", "edit_note", "TEXT"), ("jobs", "created_by", "VARCHAR(60)"),
                                      ("users", "is_system", "BOOLEAN DEFAULT 0"), ("users", "max_parallel", "INTEGER DEFAULT 5"),
-                                     ("jobs", "tokens_in", "INTEGER DEFAULT 0"), ("jobs", "tokens_out", "INTEGER DEFAULT 0"),
+                                     ("jobs", "ai_user", "VARCHAR(60)"), ("jobs", "tokens_in", "INTEGER DEFAULT 0"), ("jobs", "tokens_out", "INTEGER DEFAULT 0"),
                                      ("users", "llm_key", "TEXT"), ("users", "ai_on", "BOOLEAN DEFAULT 1"),
                                      ("folders", "created_by", "VARCHAR(60)")):
             cols = {r[1] for r in conn.execute(text(f"PRAGMA table_info({table})"))}
@@ -199,6 +201,16 @@ def ai_for(session, username: str | None) -> tuple[bool, str | None]:
         return False, None
     key = personal_key(user)
     return (True, key) if key else (ai_enabled(session), None)
+
+
+AI_SERVER = "@server"  # Job.ai_user : l'IA du serveur, sans clé personnelle
+
+
+def job_ai(session, job: Job) -> tuple[bool, str | None]:
+    """IA d'un traitement : configuration (clé, interrupteur) de l'utilisateur qu'un administrateur a choisi, sinon celle de son auteur."""
+    if job.ai_user == AI_SERVER:
+        return ai_for(session, None)
+    return ai_for(session, job.ai_user or job.created_by)
 
 
 def get_max_parallel(session) -> int:

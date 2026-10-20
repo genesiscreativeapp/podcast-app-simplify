@@ -35,6 +35,14 @@ with SessionLocal() as s:
     assert ai_for(s, "offkeyed") == (False, None)        # couper l'IA coupe aussi sa clé
     assert ai_for(s, "boss") == (True, None) and ai_for(s, None) == (True, None) and ai_for(s, "supprimé") == (True, None)
 
+    from types import SimpleNamespace as J  # IA choisie par un administrateur pour un traitement
+    from app.db import AI_SERVER, job_ai
+    assert job_ai(s, J(ai_user=None, created_by="plain")) == (True, None)
+    assert job_ai(s, J(ai_user="keyed", created_by="plain")) == (True, KEY)      # clé de « keyed » pour un traitement de « plain »
+    assert job_ai(s, J(ai_user=None, created_by="keyed")) == (True, KEY)         # sans choix : celle de l'auteur
+    assert job_ai(s, J(ai_user=AI_SERVER, created_by="keyed")) == (True, None)   # IA du serveur malgré la clé de l'auteur
+    assert job_ai(s, J(ai_user="off", created_by="keyed")) == (False, None)      # la configuration choisie coupe l'IA
+
     s.merge(Setting(key="ai_enabled", value="0")); s.commit()  # l'administrateur coupe l'IA du serveur
     assert ai_for(s, "plain") == (False, None)
     assert ai_for(s, "keyed") == (True, KEY)             # sa propre clé continue de servir

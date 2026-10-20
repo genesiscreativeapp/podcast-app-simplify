@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .. import config, r2sync, storage
-from ..db import Folder, Job, SessionLocal, ai_for, resolve_intro
+from ..db import Folder, Job, SessionLocal, job_ai, resolve_intro
 from ..utils import fmt_time
 from . import audio, steps
 from .detect import detect_sermon
@@ -75,9 +75,11 @@ def run_job(job_id: int) -> None:
         job = s.get(Job, job_id)
         folder = s.get(Folder, job.folder_id)
         intro = resolve_intro(s, folder, job.intro_id)
-        use_ai, ai_key = ai_for(s, job.created_by)  # décidé au démarrage : tout le traitement suit le même choix
+        use_ai, ai_key = job_ai(s, job)  # décidé au démarrage : tout le traitement suit le même choix
         url, title, date, filename = job.youtube_url, job.title, job.date, job.filename
         known_title = job.video_title
+        ai_who = job.ai_user or job.created_by  # propriétaire de la clé utilisée
+        ai_chosen = job.ai_user  # choisi par un administrateur
         start_ov, end_ov = job.start_override, job.end_override
 
     work = config.WORK_DIR / str(job_id)
@@ -122,7 +124,7 @@ def run_job(job_id: int) -> None:
             if not use_ai:
                 rep.log("IA désactivée : repérage par heuristique")
             elif ai_key:
-                rep.log("IA : clé Anthropic personnelle de l'utilisateur")
+                rep.log(f"IA : clé Anthropic personnelle de « {ai_who} »" + (" (choisie par un administrateur)" if ai_chosen else ""))
             start, end, note = detect_sermon(segs, duration, video_title or title, rep.log, use_ai, ai_key, rep.tokens)
         if end - start < 30:
             raise RuntimeError(f"Prédication trop courte détectée ({start:.0f}s → {end:.0f}s)")

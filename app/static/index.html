@@ -181,6 +181,9 @@
                   <select name="intro_id" id="jobIntroSelect"></select>
                   <a class="page-link" data-go="intros" href="#intros">Gérer la bibliothèque d'intros →</a>
                 </label>
+                <label class="full" id="jobAiBox" hidden>IA utilisée
+                  <select name="ai_user" id="jobAiSelect"></select>
+                </label>
                 <details class="full">
                   <summary>Options : forcer le début et la fin de la prédication</summary>
                   <div class="row">
@@ -204,6 +207,9 @@
                 <p class="hint">Préparez une liste de liens YouTube et/ou de fichiers audio ou vidéo, modifiez ou retirez des lignes, puis lancez le tout : les traitements partent dans la file d'attente. <b>Le début et la fin de la prédication se règlent pour chaque ligne.</b> La liste est conservée si vous quittez ou rechargez la page.</p>
                 <label>Intro par défaut de la liste (modifiable ligne par ligne)
                   <select id="batchIntroSelect"></select>
+                </label>
+                <label id="batchAiBox" hidden>IA utilisée pour tout le lot
+                  <select id="batchAiSelect"></select>
                 </label>
                 <div class="source-switch" id="batchSource" role="group" aria-label="Ajouter des liens ou des fichiers">
                   <button type="button" class="active" data-bsrc="url"><span data-ic="link"></span> Liens YouTube</button>

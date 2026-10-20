@@ -4,7 +4,7 @@
 const state = {
   me: null, folders: [], intros: [], current: null, view: "home",
   jobs: [], hist: { items: [], total: 0 }, home: { sig: "", q: null }, detail: null, users: [],
-  expanded: new Set(), lastActive: 0, timers: {},
+  expanded: new Set(), lastActive: 0, timers: {}, aiUsers: [],
 };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -253,7 +253,7 @@ async function startApp() {
   $("emptyNewBtn").hidden = !can("folders.manage");
   $("parallelBox").hidden = !can("settings.manage");
   $("introForm").hidden = !can("intros.manage");
-  await Promise.all([loadFolders(), loadIntros()]);
+  await Promise.all([loadFolders(), loadIntros(), loadAiUsers()]);
   await syncBatchUploads();
   loadStatus();
   await route();
@@ -484,12 +484,14 @@ async function retryDialog(job) {
     body: `<p>Corrigez les bornes si la prédication détectée n'était pas la bonne. Vide = détection automatique.</p>
       <div class="row"><label>Début<input name="start" placeholder="1:05:30" value="${esc(job.start_override || job.sermon_start || "")}"></label>
       <label>Fin<input name="end" placeholder="2:10:00" value="${esc(job.end_override || job.sermon_end || "")}"></label></div>
-      <label>Intro<select name="intro_id">${introOptions([["keep", "Ne pas changer"], ["", "Automatique (dossier, sinon par défaut)"]], true, "keep")}</select></label>`,
+      <label>Intro<select name="intro_id">${introOptions([["keep", "Ne pas changer"], ["", "Automatique (dossier, sinon par défaut)"]], true, "keep")}</select></label>
+      ${state.me.is_admin ? `<label>IA utilisée<select name="ai_user">${aiOptions([["keep", "Ne pas changer"]], "keep")}</select></label>` : ""}`,
     buttons: [{ label: "Annuler", kind: "ghost", value: null }, { label: "Relancer", primary: true }],
     submit: async (dlg) => {
       const v = (n) => dlg.querySelector(`[name=${n}]`).value;
       const body = { start: v("start"), end: v("end") };
       if (v("intro_id") !== "keep") body.intro_id = v("intro_id") === "" ? null : +v("intro_id");
+      if (state.me.is_admin && v("ai_user") !== "keep") body.ai_user = v("ai_user");
       await api(`/api/jobs/${job.id}/retry`, { method: "POST", body });
     },
   });
@@ -597,7 +599,7 @@ async function myAiDialog() {  // clé Anthropic personnelle et interrupteur pou
       ${m.can_key ? `<label>Ma clé Anthropic ${m.has_key ? `<span class="hint">(enregistrée : ${esc(m.key_hint)})</span>` : ""}
           <input name="key" type="password" autocomplete="off" placeholder="${m.has_key ? "Laisser vide pour la conserver" : "sk-ant-…"}"></label>
         <p class="hint">${m.has_key ? "Vos traitements utilisent votre clé : les appels sont facturés sur votre compte Anthropic." : m.server_ai ? "Sans clé personnelle, la clé du serveur est utilisée (si l'administrateur l'a activée)." : "Aucune IA n'est configurée sur le serveur : ajoutez votre clé pour en profiter."}
-          Elle est vérifiée à l'enregistrement, stockée chiffrée sur le serveur et ne sert qu'à vos traitements. Créez-en une sur console.anthropic.com.</p>` : ""}`,
+          Elle est vérifiée à l'enregistrement, stockée chiffrée sur le serveur. Elle sert à vos traitements, et à ceux qu'un administrateur choisit explicitement de lancer avec votre configuration. Créez-en une sur console.anthropic.com.</p>` : ""}`,
     buttons: [{ label: "Annuler", kind: "ghost", value: null }, ...(m.has_key ? [{ label: "Supprimer ma clé", kind: "danger", value: "delete" }] : []),
       { label: "Enregistrer", primary: true }],
     submit: async (dlg) => {
@@ -1098,6 +1100,7 @@ $("emptyNewBtn").onclick = () => createFolder(null);
 function openNewJob() {
   const f = byId(state.current);
   if (!f) return;
+  loadAiUsers();  // les clés enregistrées ont pu changer depuis le chargement de la page
   $("newJobWhere").textContent = `« ${f.name} »`;
   $("newJobPanel").hidden = false;
   updateFilenamePreview();
@@ -1127,6 +1130,20 @@ function effectiveIntro(folder) {  // intro du dossier, sinon du parent le plus 
   }
   const d = defaultIntro();
   return d ? { name: d.name, id: d.id, from: null } : null;
+}
+
+// Administrateur : l'IA d'un traitement peut être celle d'un autre utilisateur (sa clé Anthropic) ou celle du serveur
+const aiOptions = (extra = [], selected = "") => [...extra, ["", "Automatique (configuration de l'auteur du traitement)"], ["@server", "IA du serveur"],
+  ...state.aiUsers.map((u) => [u.username, `Clé de ${u.display_name || u.username}`])]
+  .map(([v, l]) => `<option value="${esc(v)}" ${v === selected ? "selected" : ""}>${esc(l)}</option>`).join("");
+const aiLabel = (j) => j.ai_user === "@server" ? "IA du serveur (choisie par un administrateur)"
+  : j.ai_user ? `Clé de « ${j.ai_user} » (choisie par un administrateur)` : "Configuration de l'auteur du traitement";
+
+async function loadAiUsers() {
+  if (!state.me.is_admin) return;
+  state.aiUsers = (await api("/api/users").catch(() => [])).filter((u) => u.ai_key && u.is_active);
+  for (const id of ["jobAiSelect", "batchAiSelect"]) $(id).innerHTML = aiOptions([], $(id).value);
+  $("jobAiBox").hidden = $("batchAiBox").hidden = false;
 }
 
 function renderIntroSelects() {  // un sélecteur par mode : l'intro d'un traitement individuel et celle d'un lot sont indépendantes
@@ -1273,7 +1290,7 @@ async function submitFile() {
   if (file.size > max) throw new Error(`Fichier trop volumineux (maximum ${fmtSize(max)})`);
   const fd = new FormData();
   fd.append("folder_id", state.current);
-  for (const k of ["title", "date", "start", "end", "intro_id"]) fd.append(k, form[k].value);
+  for (const k of ["title", "date", "start", "end", "intro_id", "ai_user"]) fd.append(k, form[k].value);
   fd.append("file", file);
   $("uploadProgress").hidden = false;
   try {
@@ -1507,7 +1524,7 @@ $("batchRunBtn").onclick = (e) => busy(e.currentTarget, async () => {
         const err = checkRow(r);
         if (err) throw new Error(err);
         await api("/api/jobs", { method: "POST", body: { folder_id: folder, ...(r.kind === "file" ? { upload_id: r.uploadId } : { youtube_url: r.url }),
-          title: r.title, date: r.date, start: r.start || null, end: r.end || null, intro_id: intro === "" ? null : +intro } });
+          title: r.title, date: r.date, start: r.start || null, end: r.end || null, intro_id: intro === "" ? null : +intro, ai_user: $("batchAiSelect").value } });
         batch = batch.filter((x) => x !== r);
         ok++;
       } catch (err) { r.error = err.message; }
@@ -1555,6 +1572,7 @@ async function openDetail(id, silent = false) {
     <dl class="kv">
       ${row("Fichier", esc(j.display_filename))}
       ${admin ? `${row("Intro", esc(j.intro_name))}
+      ${row("IA utilisée", esc(aiLabel(j)))}
       ${row("Source", j.from_upload ? `Fichier envoyé : ${esc(j.video_title || "")}` : "")}
       ${row("Vidéo", j.youtube_url && !j.from_upload ? `<a href="${esc(j.youtube_url)}" target="_blank" rel="noopener">${esc(j.video_title || j.youtube_url)}</a>` : "")}
       ${row("Prédication", j.sermon_start ? `${j.sermon_start} → ${j.sermon_end}` : "")}

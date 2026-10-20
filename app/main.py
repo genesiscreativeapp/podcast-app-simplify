@@ -16,8 +16,8 @@ from sqlalchemy import func, or_
 from . import auth, config, r2sync, storage, vault
 from .access import Access
 from .pipeline import audio
-from .db import (MAX_PARALLEL_LIMIT, Folder, FolderAccess, Intro, Job, Setting, SessionLocal, User, folder_path,
-                 ai_enabled, ai_for, get_max_parallel, has_perm, init_db, personal_key, queue_position)
+from .db import (AI_SERVER, MAX_PARALLEL_LIMIT, Folder, FolderAccess, Intro, Job, Setting, SessionLocal, User, folder_path,
+                 ai_enabled, ai_for, get_max_parallel, has_perm, init_db, job_ai, personal_key, queue_position)
 from .pipeline import steps
 from .pipeline.detect import ask_llm
 from .utils import fmt_time, parse_time, slugify
@@ -78,7 +78,7 @@ def job_steps(j: Job, ai: bool | None = None) -> list[dict]:
 
 def job_dict(j: Job, with_log: bool = False, s=None, a: Access | None = None) -> dict:
     d = {
-        "steps": job_steps(j, ai_for(s, j.created_by)[0] if s is not None else None),
+        "steps": job_steps(j, job_ai(s, j)[0] if s is not None else None),
         "id": j.id, "folder_id": j.folder_id, "intro_id": j.intro_id, "youtube_url": j.youtube_url,
         "title": j.title, "date": j.date, "filename": j.filename,
         "status": j.status, "step": j.step, "progress": round(j.progress or 0, 3),
@@ -94,7 +94,7 @@ def job_dict(j: Job, with_log: bool = False, s=None, a: Access | None = None) ->
         "on_r2": bool(j.r2_key_mp3),
         "created_at": j.created_at.isoformat() if j.created_at else None,
         "finished_at": j.finished_at.isoformat() if j.finished_at else None,
-        "tokens_in": j.tokens_in or 0, "tokens_out": j.tokens_out or 0,
+        "ai_user": j.ai_user, "tokens_in": j.tokens_in or 0, "tokens_out": j.tokens_out or 0,
         "edit_note": j.edit_note, "created_by": j.created_by, "from_upload": j.youtube_url.startswith(UPLOAD_SCHEME),
         "display_filename": r2sync.display_filename(j), "r2_key": j.r2_key_mp3,
     }
@@ -108,7 +108,7 @@ def job_dict(j: Job, with_log: bool = False, s=None, a: Access | None = None) ->
         d["log"] = j.log
     if a is not None and not a.admin:  # utilisateur lambda : pas de détails techniques (source, repérage, montage, journal, chemin R2)
         d.update(youtube_url="", video_title=None, start_override="", end_override="", sermon_start="", sermon_end="",
-                 detection_note=None, edit_note=None, duration_source="", r2_key=None,
+                 detection_note=None, edit_note=None, duration_source="", r2_key=None, ai_user=None,
                  error="Le traitement a échoué. Contactez un administrateur." if j.error else None)
         d.pop("log", None)
     return d
@@ -336,12 +336,26 @@ class JobIn(BaseModel):
     start: str | None = None
     end: str | None = None
     intro_id: int | None = None  # None = automatique ; 0 = aucune intro
+    ai_user: str | None = None  # administrateur : IA d'un autre utilisateur (ou du serveur) ; vide = celle de l'auteur
 
 
 class RetryIn(BaseModel):
     start: str | None = None
     end: str | None = None
     intro_id: int | None = None  # pris en compte seulement s'il est envoyé
+    ai_user: str | None = None  # idem
+
+
+def _check_ai_user(s, a: Access, value: str | None) -> str | None:
+    """Configuration d'IA choisie pour un traitement (réservé aux administrateurs). None = celle de l'auteur."""
+    v = (value or "").strip()
+    if not v:
+        return None
+    if not a.admin:
+        raise HTTPException(403, "Seul un administrateur peut choisir l'IA d'un traitement")
+    if v != AI_SERVER and not s.query(User).filter(User.username == v).first():
+        raise HTTPException(404, "Utilisateur introuvable")
+    return v
 
 
 def _check_intro(s, intro_id):
@@ -445,10 +459,10 @@ def _staged(upload_id: str, user: User) -> tuple[Path, dict]:
 
 
 def _job_from_staged(s, a: Access, user: User, upload_id: str, folder_id: int, title: str, day: str,
-                     start, end, intro) -> Job:
+                     start, end, intro, ai_user=None) -> Job:
     """Crée le traitement et lui donne le fichier en attente comme audio source (même suite que pour un lien)."""
     d, meta = _staged(upload_id, user)
-    job = Job(folder_id=folder_id, intro_id=intro, created_by=user.username,
+    job = Job(folder_id=folder_id, intro_id=intro, ai_user=ai_user, created_by=user.username,
               youtube_url=f"{UPLOAD_SCHEME}{meta['name']}", video_title=Path(meta["name"]).stem, title=title, date=day,
               filename=f"{slugify(title)}_{day}", start_override=start, end_override=end)
     s.add(job)
@@ -500,15 +514,16 @@ def delete_upload(upload_id: str, request: Request):
 @app.post("/api/jobs", dependencies=[Depends(auth.need("jobs.create"))])
 def create_job(body: JobIn, request: Request, s=Depends(db), a: Access = Depends(acl)):
     a.need_folder(body.folder_id)
+    ai_user = _check_ai_user(s, a, body.ai_user)
     if body.upload_id:
         title, day, start, end = _job_fields(body.title, body.date, body.start, body.end, body.intro_id, s)
-        job = _job_from_staged(s, a, request.state.user, body.upload_id, body.folder_id, title, day, start, end, body.intro_id)
+        job = _job_from_staged(s, a, request.state.user, body.upload_id, body.folder_id, title, day, start, end, body.intro_id, ai_user)
         return job_dict(job, s=s, a=a)
     url = body.youtube_url.strip()
     if not url.startswith(("http://", "https://")):
         raise HTTPException(400, "Lien YouTube invalide")
     title, day, start, end = _job_fields(body.title, body.date, body.start, body.end, body.intro_id, s)
-    job = Job(folder_id=body.folder_id, intro_id=body.intro_id, created_by=request.state.user.username, youtube_url=url, title=title, date=day,
+    job = Job(folder_id=body.folder_id, intro_id=body.intro_id, ai_user=ai_user, created_by=request.state.user.username, youtube_url=url, title=title, date=day,
               filename=f"{slugify(title)}_{day}", start_override=start, end_override=end)
     s.add(job)
     s.commit()
@@ -517,10 +532,11 @@ def create_job(body: JobIn, request: Request, s=Depends(db), a: Access = Depends
 
 @app.post("/api/jobs/upload", dependencies=[Depends(auth.need("jobs.create"))])
 def create_job_from_file(request: Request, file: UploadFile = File(...), folder_id: int = Form(...), title: str = Form(""),
-                         date: str = Form(""), start: str = Form(""), end: str = Form(""), intro_id: str = Form(""),
+                         date: str = Form(""), start: str = Form(""), end: str = Form(""), intro_id: str = Form(""), ai_user: str = Form(""),
                          s=Depends(db), a: Access = Depends(acl)):
     """Traitement individuel à partir d'un fichier audio/vidéo envoyé (au lieu d'un lien YouTube) : envoi puis rattachement."""
     a.need_folder(folder_id)
+    ai_user = _check_ai_user(s, a, ai_user)
     try:
         intro = None if intro_id == "" else int(intro_id)
     except ValueError:
@@ -530,7 +546,7 @@ def create_job_from_file(request: Request, file: UploadFile = File(...), folder_
     user = request.state.user
     meta = _stage_file(file, user.username)
     try:
-        job = _job_from_staged(s, a, user, meta["id"], folder_id, title, day, start_s, end_s, intro)
+        job = _job_from_staged(s, a, user, meta["id"], folder_id, title, day, start_s, end_s, intro, ai_user)
     except BaseException:
         shutil.rmtree(config.STAGING_DIR / meta["id"], ignore_errors=True)
         raise
@@ -620,6 +636,8 @@ def retry_job(job_id: int, body: RetryIn, s=Depends(db), a: Access = Depends(acl
     if "intro_id" in body.model_fields_set:
         _check_intro(s, body.intro_id)
         job.intro_id = body.intro_id
+    if "ai_user" in body.model_fields_set:
+        job.ai_user = _check_ai_user(s, a, body.ai_user)
     job.status, job.step, job.progress, job.error = "pending", "En attente", 0.0, None
     job.updated_at = datetime.utcnow()  # repart en fin de file
     job.log = (job.log or "") + f"\n--- Relancé le {datetime.now():%d/%m/%Y %H:%M} ---\n"
@@ -949,7 +967,7 @@ def change_password(body: PasswordIn, request: Request, s=Depends(db)):
 
 @app.get("/api/users", dependencies=[Depends(auth.need("admin"))])
 def list_users(s=Depends(db)):
-    return [auth.user_dict(u) for u in s.query(User).order_by(User.username).all()]
+    return [{**auth.user_dict(u), "ai_key": bool(personal_key(u))} for u in s.query(User).order_by(User.username).all()]
 
 
 @app.post("/api/users", dependencies=[Depends(auth.need("admin"))])
