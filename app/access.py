@@ -16,7 +16,7 @@ NOT_YOURS_JOB = "Ce podcast n'a pas été créé par vous : vous ne pouvez pas l
 class Access:
     def __init__(self, s, user: User):
         self.user, self.admin = user, user.is_admin
-        self.folders = {f.id: f for f in s.query(Folder)}
+        self.folders = {f.id: f for f in s.query(Folder).filter(Folder.deleted_at.is_(None))}  # la corbeille n'apparaît nulle part ailleurs
         self.assigned = {r[0] for r in s.query(FolderAccess.folder_id).filter(FolderAccess.user_id == user.id)}
         self._visible: set[int] | None = None
 
@@ -46,7 +46,8 @@ class Access:
         return self.admin or job.created_by == self.user.username
 
     def jobs(self, query):
-        """Restreint une requête sur Job aux dossiers visibles."""
+        """Restreint une requête sur Job aux traitements hors corbeille des dossiers visibles."""
+        query = query.filter(Job.deleted_at.is_(None))
         return query if self.admin else query.filter(Job.folder_id.in_(self.visible_ids() or {-1}))
 
     def need_folder(self, fid) -> Folder:
@@ -62,7 +63,7 @@ class Access:
 
     def need_job(self, s, job_id, edit=False) -> Job:
         job = s.get(Job, job_id)
-        if job is None or not self.can_see(job.folder_id):
+        if job is None or job.deleted_at is not None or not self.can_see(job.folder_id):
             raise HTTPException(404, "Traitement introuvable")
         if edit and not self.owns_job(job):
             raise HTTPException(403, NOT_YOURS_JOB)

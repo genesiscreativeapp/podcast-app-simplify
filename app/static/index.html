@@ -57,7 +57,9 @@
           <button class="nav-link" data-nav="folders"><span data-ic="folder"></span> Dossiers <span class="nav-badge" id="navFoldersBadge" hidden></span></button>
           <button class="nav-link" data-nav="history"><span data-ic="history"></span> Historique</button>
           <button class="nav-link" data-nav="intros"><span data-ic="music"></span> Bibliothèque d'intros</button>
+          <button class="nav-link" data-nav="trash"><span data-ic="trash"></span> Corbeille</button>
           <button class="nav-link" data-nav="users" id="navUsers" hidden><span data-ic="users"></span> Utilisateurs</button>
+          <button class="nav-link" data-nav="perms" id="navPerms" hidden><span data-ic="lock"></span> Permissions</button>
         </nav>
       </aside>
 
@@ -130,6 +132,26 @@
             </div>
             <p class="hint">L'administrateur a tous les droits et gère les comptes. Les autres utilisateurs n'ont accès qu'aux fonctions cochées.</p>
             <div id="usersList" class="jobs"></div>
+          </section>
+
+          <!-- Permissions (administrateur) -->
+          <section id="permsView" hidden>
+            <div class="page-head"><h1>Permissions</h1></div>
+            <p class="hint">Choisissez un utilisateur : définissez ce qu'il peut faire, et quels dossiers d'autres utilisateurs lui sont attribués.</p>
+            <div class="perms-layout">
+              <div id="permsUsers" class="perms-users"></div>
+              <div id="permsPanel" class="perms-panel"></div>
+            </div>
+          </section>
+
+          <!-- Corbeille -->
+          <section id="trashView" hidden>
+            <div class="page-head">
+              <h1>Corbeille</h1>
+              <button class="btn ghost danger" id="trashEmpty" hidden><span data-ic="trash"></span> Vider la corbeille</button>
+            </div>
+            <p class="hint" id="trashHint"></p>
+            <div id="trashList" class="jobs"></div>
           </section>
 
           <!-- Dossiers : explorateur de fichiers -->

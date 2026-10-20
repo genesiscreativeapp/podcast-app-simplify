@@ -70,7 +70,19 @@ class Setting(Base):
     """Réglages modifiables depuis l'interface (clé / valeur)."""
     __tablename__ = "settings"
     key: Mapped[str] = mapped_column(String(50), primary_key=True)
-    value: Mapped[str] = mapped_column(String(200))
+    value: Mapped[str] = mapped_column(Text)  # SQLite n'impose pas de longueur : la clé d'API chiffrée dépasse 200 caractères
+
+
+class AiUsage(Base):
+    """Registre de la consommation de l'IA : une ligne par appel (tokens entrée / sortie), pour les compteurs."""
+    __tablename__ = "ai_usage"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    username: Mapped[str] = mapped_column(String(60))  # à qui l'appel est facturé : propriétaire de la clé, ou AI_SERVER
+    author: Mapped[str | None] = mapped_column(String(60), nullable=True)  # qui a lancé le traitement
+    job_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tokens_in: Mapped[int] = mapped_column(Integer, default=0)
+    tokens_out: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class Intro(Base):
@@ -92,6 +104,8 @@ class Folder(Base):
     intro_id: Mapped[int | None] = mapped_column(nullable=True)  # intro de la bibliothèque (sinon : parent)
     created_by: Mapped[str | None] = mapped_column(String(60), nullable=True)  # NULL = créé par l'administration
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # corbeille : NULL = présent
+    deleted_by: Mapped[str | None] = mapped_column(String(60), nullable=True)
 
 
 class FolderAccess(Base):
@@ -145,6 +159,8 @@ class Job(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # corbeille : NULL = présent
+    deleted_by: Mapped[str | None] = mapped_column(String(60), nullable=True)
 
 
 def init_db() -> None:
@@ -166,6 +182,8 @@ def _init_db() -> None:
         for table, col, sql_type in (("jobs", "intro_id", "INTEGER"), ("folders", "intro_id", "INTEGER"),
                                      ("jobs", "edit_note", "TEXT"), ("jobs", "created_by", "VARCHAR(60)"),
                                      ("users", "is_system", "BOOLEAN DEFAULT 0"), ("users", "max_parallel", "INTEGER DEFAULT 5"),
+                                     ("jobs", "deleted_at", "DATETIME"), ("jobs", "deleted_by", "VARCHAR(60)"),
+                                     ("folders", "deleted_at", "DATETIME"), ("folders", "deleted_by", "VARCHAR(60)"),
                                      ("jobs", "ai_user", "VARCHAR(60)"), ("jobs", "tokens_in", "INTEGER DEFAULT 0"), ("jobs", "tokens_out", "INTEGER DEFAULT 0"),
                                      ("users", "llm_key", "TEXT"), ("users", "ai_on", "BOOLEAN DEFAULT 1"),
                                      ("folders", "created_by", "VARCHAR(60)")):
@@ -177,10 +195,24 @@ def _init_db() -> None:
 MAX_PARALLEL_LIMIT = 20
 
 
+AI_SERVER = "@server"  # IA du serveur : Job.ai_user (choix d'un administrateur) et propriétaire des appels dans AiUsage
+DEFAULT_MODEL = "claude-sonnet-5-5"
+
+
+def setting(session, key: str, default: str = "") -> str:
+    row = session.get(Setting, key)
+    return row.value if row else default
+
+
+def server_llm(session) -> dict | None:
+    """IA du serveur, réglée par l'administrateur dans l'interface (clé Anthropic chiffrée) : {key, model}, ou None."""
+    key = vault.decrypt(setting(session, "llm_key")) if setting(session, "llm_key") else None
+    return {"key": key, "model": setting(session, "llm_model") or DEFAULT_MODEL} if key else None
+
+
 def ai_enabled(session) -> bool:
-    """L'IA sert si un fournisseur est configuré (LLM_PROVIDER) ET que l'administrateur ne l'a pas désactivée dans l'interface."""
-    row = session.get(Setting, "ai_enabled")
-    return config.LLM_PROVIDER in ("anthropic", "openai") and (row is None or row.value != "0")
+    """L'IA du serveur sert si elle est configurée ET que l'administrateur ne l'a pas désactivée (interrupteur)."""
+    return server_llm(session) is not None and setting(session, "ai_enabled") != "0"
 
 
 def has_perm(user: User | None, perm: str) -> bool:
@@ -192,21 +224,27 @@ def personal_key(user: User | None) -> str | None:
     return vault.decrypt(user.llm_key) if user and user.llm_key and has_perm(user, "ai.key") else None
 
 
-def ai_for(session, username: str | None) -> tuple[bool, str | None]:
-    """(IA utilisée, clé Anthropic personnelle ou None) pour les traitements de cet utilisateur.
-    Sa clé personnelle (permission ai.key) remplace celle du serveur, même si l'administrateur a coupé l'IA du serveur.
-    Il peut couper l'IA pour lui seul (permission ai.toggle) ; sans cette permission, l'IA suit le réglage du serveur."""
+def personal_llm(session, key: str, owner: str) -> dict:
+    """Appel avec une clé personnelle, sur le même modèle que celui réglé pour le serveur."""
+    srv = server_llm(session)
+    return {"key": key, "model": srv["model"] if srv else DEFAULT_MODEL, "owner": owner}
+
+
+def ai_for(session, username: str | None) -> dict | None:
+    """IA à utiliser pour les traitements de cet utilisateur : {key, model, owner}, ou None = sans IA.
+    Sa clé personnelle (permission ai.key) remplace l'IA du serveur, même si l'administrateur a coupé celle-ci.
+    Il peut couper l'IA pour lui seul (permission ai.toggle) ; sans cette permission, l'IA suit le réglage du serveur.
+    `owner` : à qui la consommation est facturée (propriétaire de la clé, ou AI_SERVER)."""
     user = session.query(User).filter(User.username == username).first() if username else None
     if has_perm(user, "ai.toggle") and not user.ai_on:
-        return False, None
+        return None
     key = personal_key(user)
-    return (True, key) if key else (ai_enabled(session), None)
+    if key:
+        return personal_llm(session, key, user.username)
+    return {**server_llm(session), "owner": AI_SERVER} if ai_enabled(session) else None
 
 
-AI_SERVER = "@server"  # Job.ai_user : l'IA du serveur, sans clé personnelle
-
-
-def job_ai(session, job: Job) -> tuple[bool, str | None]:
+def job_ai(session, job: Job) -> dict | None:
     """IA d'un traitement : configuration (clé, interrupteur) de l'utilisateur qu'un administrateur a choisi, sinon celle de son auteur."""
     if job.ai_user == AI_SERVER:
         return ai_for(session, None)
@@ -229,7 +267,7 @@ QUEUE_ORDER = (Job.updated_at, Job.id)
 def queue_position(session, job: Job) -> int:
     """Rang (1 = prochain) d'un traitement en attente."""
     ahead = session.query(Job).filter(
-        Job.status == "pending",
+        Job.status == "pending", Job.deleted_at.is_(None),
         (Job.updated_at < job.updated_at) | ((Job.updated_at == job.updated_at) & (Job.id < job.id)),
     ).count()
     return ahead + 1

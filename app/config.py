@@ -63,13 +63,6 @@ DETECT_CLIP = int(_env("DETECT_CLIP", "15"))
 # et les mêmes cœurs : au-delà de 2-3, chacun va plus lentement.
 MAX_PARALLEL_JOBS = int(_env("MAX_PARALLEL_JOBS", "2"))
 
-# --- Détection de la prédication par LLM (optionnel) ----------------------
-# none | anthropic | openai   (openai = toute API compatible : OpenAI, Groq, Ollama...)
-LLM_PROVIDER = _env("LLM_PROVIDER", "none").lower()
-LLM_API_KEY = _env("LLM_API_KEY", "")
-LLM_MODEL = _env("LLM_MODEL", "")
-LLM_BASE_URL = _env("LLM_BASE_URL", "https://api.openai.com/v1")
-
 # --- Qualité de la voix ----------------------------------------------------------
 # Réduction de bruit (dB) : une réduction forte donne une voix « métallique ». 0 = désactivée.
 DENOISE_DB = float(_env("DENOISE_DB", "6"))
@@ -82,7 +75,7 @@ REPEAT_MAX_GAP = float(_env("REPEAT_MAX_GAP", "1.0"))    # pause max (s) entre d
 REPEAT_MAX_WORDS = int(_env("REPEAT_MAX_WORDS", "8"))    # longueur max (en mots) d'une phrase répétée retirée
 # Amorce Whisper : l'encourage à transcrire les « euh » et répétitions au lieu de les gommer
 WHISPER_PROMPT = _env("WHISPER_PROMPT", "Euh... alors, euh, mes frères, mes frères et sœurs, hum, voilà, euh, la foi, la foi.")
-# Retire témoignages, annonces, chants et autres voix de la prédication (nécessite LLM_PROVIDER)
+# Retire témoignages, annonces, chants et autres voix de la prédication (nécessite une IA : celle du serveur, réglée par l'administrateur, ou la clé de l'utilisateur)
 REMOVE_OFFTOPIC = _bool("REMOVE_OFFTOPIC", True)
 # Marge ajoutée autour de la prédication repérée automatiquement (secondes) : l'IA retire ensuite précisément
 # l'adoration qui précède et les annonces qui suivent. Sans marge, un début repéré un peu tard couperait le message.

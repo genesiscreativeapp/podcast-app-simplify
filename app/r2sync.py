@@ -59,7 +59,7 @@ def desired_key(s, job: Job, taken: set[str] | None = None) -> str:
 def reconcile(s) -> dict:
     """Met R2 en conformité avec la plateforme. Idempotent : ne touche que ce qui n'est pas au bon endroit."""
     report = {"moved": 0, "uploaded": 0, "markers": 0, "failed": []}
-    jobs = s.query(Job).filter(Job.status == "done", Job.local_mp3.isnot(None)).order_by(Job.id).all()
+    jobs = s.query(Job).filter(Job.status == "done", Job.local_mp3.isnot(None), Job.deleted_at.is_(None)).order_by(Job.id).all()  # en corbeille : le fichier R2 reste tel quel
     current = {j.id: j.r2_key_mp3 for j in jobs if j.r2_key_mp3}
     for j in jobs:
         taken = {k for i, k in current.items() if i != j.id}
@@ -84,7 +84,7 @@ def reconcile(s) -> dict:
             report["failed"].append({"job": j.id, "title": j.title, "error": str(exc)[:240]})
     # dossiers (y compris vides) : un objet vide « chemin/ » par dossier
     try:
-        desired = {folder_prefix(s, f) + "/" for f in s.query(Folder).all()}
+        desired = {folder_prefix(s, f) + "/" for f in s.query(Folder).filter(Folder.deleted_at.is_(None))}
         recorded = {m.key for m in s.query(R2Marker)}
         for key in desired - recorded:
             storage.put_marker(key)
