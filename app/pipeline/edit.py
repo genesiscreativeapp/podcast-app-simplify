@@ -5,6 +5,7 @@
 - Les mots parasites et répétitions viennent des horodatages mot à mot.
   Les répétitions d'emphase volontaires (« Amen, amen ! », « Il est fidèle, il est fidèle ! »
   dites avec une pause) sont préservées : seules les répétitions immédiates sont retirées.
+- Ce qui est bien plus faible que la voix (murmures, souffles, réverbération) est atténué.
 - Les réactions du public (applaudissements, rires, « Amen » de l'assemblée) entre deux phrases du prédicateur sont retirées.
 """
 import re
@@ -13,7 +14,7 @@ import unicodedata
 import numpy as np
 import soundfile as sf
 
-FILLERS = {"euh", "euhh", "euhhh", "euhm", "heu", "heuu", "heum", "hum", "hmm", "hmmm", "mmh", "mmm", "mh", "ehm", "bah"}
+FILLERS = {"euh", "euhh", "euhhh", "euhm", "heu", "heuu", "heum", "hum", "hmm", "hmmm", "mmh", "mmm", "mh", "ehm", "bah", "ben", "beh"}
 PROTECTED = {"amen", "alleluia", "gloire", "oui", "non", "saint", "merci", "jesus",
              "seigneur", "dieu", "hosanna", "louange"}
 
@@ -38,6 +39,17 @@ def _smooth_db(audio: np.ndarray, sr: int, frame: float) -> tuple[np.ndarray, fl
     db = np.convolve(_frames_db(audio, sr, frame), np.ones(5) / 5, mode="same")
     p10, p90 = np.percentile(db, 10), np.percentile(db, 90)
     return db, p10 + 0.3 * (p90 - p10)
+
+
+def attenuate_ambient(audio: np.ndarray, sr: int, atten_db: float, frame: float = 0.02) -> np.ndarray:
+    """Expandeur descendant : ce qui est bien plus faible que la voix (murmures de l'assemblée, souffles, réverbération
+    entre les phrases) est atténué de `atten_db` dB au plus. La voix du prédicateur n'est pas touchée."""
+    db, _ = _smooth_db(audio, sr, frame)
+    floor = np.percentile(db, 90) - 15            # sous ce niveau (par rapport à la voix forte), on atténue progressivement
+    gain_db = np.convolve(-np.clip((floor - db) * 0.5, 0, atten_db), np.ones(5) / 5, mode="same")
+    gain = np.repeat(10 ** (gain_db / 20), int(sr * frame)).astype(np.float32)
+    gain = np.pad(gain, (0, max(len(audio) - len(gain), 0)), mode="edge")[:len(audio)]
+    return audio * gain
 
 
 def silence_cuts(audio: np.ndarray, sr: int, max_pause: float, target_pause: float,
@@ -115,8 +127,8 @@ def word_cuts(words: list[dict], remove_fillers: bool, remove_repeats: bool,
 REACTION_WORDS = {"amen", "oui", "alleluia", "hallelujah", "hosanna", "gloire", "merci", "jesus", "ah", "oh", "bravo", "hum"}
 
 
-def reaction_cuts(audio: np.ndarray, sr: int, words: list[dict], target_pause: float, min_gap: float = 1.5,
-                  quiet_db: float = 8.0, frame: float = 0.02) -> list[tuple[float, float]]:
+def reaction_cuts(audio: np.ndarray, sr: int, words: list[dict], target_pause: float, min_gap: float = 1.2,
+                  quiet_db: float = 6.0, frame: float = 0.02) -> list[tuple[float, float]]:
     """Réactions du public qui ne sont pas la voix du prédicateur :
     - applaudissements, rires, bruit : un trou de plus de `min_gap` s entre deux mots où le son reste présent
       est ramené à une pause (la voix du prédicateur n'y est pas, Whisper n'y entend aucun mot) ;
@@ -206,7 +218,7 @@ def sentence_end(words: list[dict], nominal: float, horizon: float, min_gap: flo
 def edit_file(src, dst, words: list[dict], max_pause: float, target_pause: float,
               remove_fillers: bool = True, remove_repeats: bool = True,
               extra_cuts: list[tuple[float, float]] = (), repeat_gap: float = 1.0, repeat_words: int = 8,
-              remove_reactions: bool = False) -> dict:
+              remove_reactions: bool = False, ambient_atten_db: float = 0.0) -> dict:
     audio, sr = sf.read(str(src), dtype="float32")
     if audio.ndim > 1:
         audio = audio.mean(axis=1)
@@ -218,6 +230,8 @@ def edit_file(src, dst, words: list[dict], max_pause: float, target_pause: float
     keep = keep_intervals(s_cuts + w_cuts + r_cuts + list(extra_cuts), total)
     if not keep:
         keep = [(0.0, total)]
+    if ambient_atten_db > 0:
+        audio = attenuate_ambient(audio, sr, ambient_atten_db)
     result = render(audio, sr, keep)
     sf.write(str(dst), result, sr, subtype="PCM_16")
     stats.update({

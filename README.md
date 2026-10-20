@@ -101,7 +101,8 @@ Le bilan (passages retirés, avec leurs horaires) est visible dans les détails 
 | Bruit, souffle | Filtres ffmpeg (passe-haut, réduction de bruit FFT, compresseur) | `app/pipeline/audio.py` |
 | « euh », « hum » | Horodatages mot à mot de Whisper | `REMOVE_FILLERS` |
 | Mots et phrases répétés (« la foi, la foi », « Dieu est bon, Dieu est bon ») | Répétitions **immédiates** (pause < `REPEAT_MAX_GAP`, jusqu'à `REPEAT_MAX_WORDS` mots) ; la dernière copie est gardée | `REMOVE_REPEATS` |
-| Réactions du public (applaudissements, rires, « Amen » de l'assemblée) | Trou de plus de 1,5 s sans parole du prédicateur mais avec du son, ou mots de réaction isolés et nettement plus faibles que sa voix. **Non retirées** quand elles couvrent sa voix | `REMOVE_REACTIONS` |
+| Réactions du public (applaudissements, rires, « Amen » de l'assemblée) | Trou de plus de 1,2 s sans parole du prédicateur mais avec du son, ou mots de réaction isolés et nettement plus faibles que sa voix. **Non retirées** quand elles couvrent sa voix | `REMOVE_REACTIONS` |
+| Murmures, souffles, réverbération entre les phrases | Expandeur : tout ce qui est bien plus faible que la voix est atténué (10 dB au plus) | `AMBIENT_ATTEN_DB` |
 | Volume | Normalisation à -16 LUFS (standard podcast) | — |
 | Fin | Fondu de sortie ; coupure sur une fin de phrase | `FADE_OUT`, `END_MARGIN` |
 

@@ -68,8 +68,8 @@ MAX_PARALLEL_JOBS = int(_env("MAX_PARALLEL_JOBS", "2"))
 DENOISE_DB = float(_env("DENOISE_DB", "6"))
 
 # --- Montage ---------------------------------------------------------------
-MAX_PAUSE = float(_env("MAX_PAUSE", "0.8"))        # silence au-delà duquel on raccourcit (s)
-TARGET_PAUSE = float(_env("TARGET_PAUSE", "0.45")) # durée du silence conservé (s)
+MAX_PAUSE = float(_env("MAX_PAUSE", "0.7"))        # silence au-delà duquel on raccourcit (s)
+TARGET_PAUSE = float(_env("TARGET_PAUSE", "0.4")) # durée du silence conservé (s)
 REMOVE_REPEATS = _bool("REMOVE_REPEATS", True)
 REPEAT_MAX_GAP = float(_env("REPEAT_MAX_GAP", "1.0"))    # pause max (s) entre deux répétitions pour les retirer
 REPEAT_MAX_WORDS = int(_env("REPEAT_MAX_WORDS", "8"))    # longueur max (en mots) d'une phrase répétée retirée
@@ -86,6 +86,8 @@ FADE_OUT = float(_env("FADE_OUT", "2.5"))
 END_MARGIN = float(_env("END_MARGIN", "25"))
 REMOVE_FILLERS = _bool("REMOVE_FILLERS", True)
 # Retire les réactions du public entre les phrases du prédicateur : applaudissements, rires, « Amen » de l'assemblée
+# Atténuation maximale (dB) de ce qui est bien plus faible que la voix : murmures, souffles, réverbération. 0 = aucune.
+AMBIENT_ATTEN_DB = float(_env("AMBIENT_ATTEN_DB", "10"))
 REMOVE_REACTIONS = _bool("REMOVE_REACTIONS", True)
 
 # --- Compression -------------------------------------------------------------

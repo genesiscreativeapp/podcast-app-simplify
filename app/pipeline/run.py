@@ -248,7 +248,7 @@ def run_job(job_id: int) -> None:
         stats = edit_file(clean, edited, words, config.MAX_PAUSE, config.TARGET_PAUSE,
                           config.REMOVE_FILLERS, config.REMOVE_REPEATS, extra_cuts + cond_cuts,
                           config.REPEAT_MAX_GAP, config.REPEAT_MAX_WORDS,
-                          config.REMOVE_REACTIONS)
+                          config.REMOVE_REACTIONS, config.AMBIENT_ATTEN_DB)
         examples = " ; ".join(f"« {e} »" for e in stats["examples"][:5])
         note = [f"{stats['pauses']} silences raccourcis", f"{stats['fillers']} hésitations retirées",
                 f"{stats['repeats']} répétitions retirées" + (f" (ex. : {examples})" if examples else "")]

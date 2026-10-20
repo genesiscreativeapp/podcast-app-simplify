@@ -52,4 +52,15 @@ off = edit_file(wav, out, words, 5.0, 0.45, False, False)           # pauses lon
 on = edit_file(wav, out, words, 5.0, 0.45, False, False, remove_reactions=True)
 assert off["reactions"] == 0 and on["reactions"] == 2, (off, on)
 assert 3.0 < off["after"] - on["after"] < 4.2, (off["after"], on["after"])
+# murmures de l'assemblée (−30 dB sous la voix) : atténués d'au moins 6 dB ; la voix, elle, reste intacte
+from app.pipeline.edit import attenuate_ambient  # noqa: E402
+
+voice = rng.normal(0, 0.2, SR * 2)
+murmur = rng.normal(0, 0.006, SR * 2)
+mix = np.concatenate([voice, murmur, voice]).astype("float32")
+res = attenuate_ambient(mix, SR, 10.0)
+rms = lambda x: np.sqrt(np.mean(x.astype(np.float64) ** 2))  # noqa: E731
+mid = slice(int(2.5 * SR), int(3.5 * SR))
+assert 20 * np.log10(rms(mix[mid]) / rms(res[mid])) > 6, "murmure non atténué"
+assert abs(20 * np.log10(rms(mix[SR // 2:int(1.5 * SR)]) / rms(res[SR // 2:int(1.5 * SR)]))) < 0.5, "voix altérée"
 print("ok")
