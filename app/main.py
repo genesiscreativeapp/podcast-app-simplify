@@ -75,8 +75,8 @@ def job_steps(j: Job, ai: bool) -> list[dict]:
         skipped.add("upload")
     if not (config.REMOVE_OFFTOPIC and ai):
         skipped.add("clean")  # témoignages et annonces : nécessite une IA
-    if not j.condense_pct:
-        skipped.add("condense")  # durée d'origine conservée
+    if not j.condense_pct and j.condense_mode != "review":
+        skipped.add("condense")  # durée d'origine conservée et pas de relecture demandée
     return steps.view(j.progress or 0.0, j.status, skipped)
 
 
@@ -755,6 +755,8 @@ def get_review(job_id: int, s=Depends(db), a: Access = Depends(acl)):
 
 class ReviewIn(BaseModel):
     removed: list[int]  # phrases à retirer : celles proposées que l'utilisateur garde dans la liste, et celles qu'il ajoute
+    texts: dict[int, str] = {}  # corrections du texte français (n'ont aucun effet sur l'audio : elles servent au texte enregistré et à la version anglaise)
+    validate: bool = True  # False : simple enregistrement, la relecture continue
 
 
 @app.post("/api/jobs/{job_id}/review", dependencies=[Depends(auth.need("jobs.create"))])
@@ -762,10 +764,26 @@ def post_review(job_id: int, body: ReviewIn, s=Depends(db), a: Access = Depends(
     """Valide les coupes : le traitement reprend aussitôt après la condensation, sans rien refaire."""
     job, rv = _review_job(s, a, job_id)
     rv["chosen"] = sorted(set(body.removed) & {x["id"] for x in rv["sentences"]})
-    job.review_json, job.review_ok = json.dumps(rv), True
+    edited = 0
+    for sent in rv["sentences"]:
+        new = body.texts.get(sent["id"], sent.get("edited") or sent["text"]).strip()[:2000]
+        if new and new != sent["text"]:
+            sent["edited"] = new
+        else:
+            sent.pop("edited", None)
+        edited += "edited" in sent
+    if body.validate and len(rv["chosen"]) >= len(rv["sentences"]):
+        raise HTTPException(400, "Il faut garder au moins une phrase")
+    job.review_json = json.dumps(rv, ensure_ascii=False)
+    now = f"[{datetime.now():%H:%M:%S}]"
+    if not body.validate:  # brouillon : le traitement reste en attente de validation
+        job.log = (job.log or "") + f"{now} Brouillon enregistré par {a.user.username} ({len(rv['chosen'])} phrase(s) retirée(s), {edited} corrigée(s))\n"
+        s.commit()
+        return job_dict(job, s=s, a=a)
+    job.review_ok = True
     job.status, job.step, job.error = "pending", "Validé : reprise du montage", None
     job.updated_at = job.created_at or datetime.utcnow()  # il a déjà attendu : il repart devant les nouveaux
-    job.log = (job.log or "") + f"[{datetime.now():%H:%M:%S}] Coupes validées : {len(rv['chosen'])} phrase(s) retirée(s) sur {len(rv['removed'])} proposée(s)\n"
+    job.log = (job.log or "") + f"{now} Texte validé : {len(rv['chosen'])} phrase(s) retirée(s) sur {len(rv['removed'])} proposée(s), {edited} corrigée(s)\n"
     s.commit()
     return job_dict(job, s=s, a=a)
 
@@ -896,6 +914,8 @@ def get_english_review(job_id: int, s=Depends(db), a: Access = Depends(acl)):
 
 class EnglishReviewIn(BaseModel):
     texts: dict[int, str]  # numéro de phrase → texte anglais (corrigé ou non) ; vide : la phrase est retirée
+    off: list[int] = []  # phrases que la voix ne dira pas (leur texte est gardé : on peut les remettre)
+    validate: bool = True  # False : simple enregistrement, la relecture continue
 
 
 @app.post("/api/jobs/{job_id}/english/review", dependencies=[Depends(auth.need("english.create"))])
@@ -906,11 +926,21 @@ def post_english_review(job_id: int, body: EnglishReviewIn, s=Depends(db), a: Ac
     for t in text:
         if t["id"] in body.texts:
             t["en"] = body.texts[t["id"]].strip()[:2000]
-    if not any(t["en"] for t in text):
-        raise HTTPException(400, "Le texte anglais est vide")
-    en.text_json, en.review_ok = json.dumps(text, ensure_ascii=False), True
+        t.pop("off", None)
+        if t["id"] in body.off:
+            t["off"] = True
+    used = sum(1 for t in text if t["en"] and not t.get("off"))
+    if body.validate and not used:
+        raise HTTPException(400, "Il faut garder au moins une phrase dans le texte anglais")
+    en.text_json = json.dumps(text, ensure_ascii=False)
+    now = f"[{datetime.now():%H:%M:%S}]"
+    if not body.validate:  # brouillon : la relecture continue, la voix n'est pas lancée
+        en.log = (en.log or "") + f"{now} Brouillon du texte anglais enregistré par {a.user.username} ({used} phrase(s) gardée(s) sur {len(text)})\n"
+        s.commit()
+        return job_dict(job, s=s, a=a)
+    en.review_ok = True
     en.status, en.step = "pending", "Texte validé : la voix va être générée"
-    en.log = (en.log or "") + f"[{datetime.now():%H:%M:%S}] Texte anglais validé par {a.user.username} : {sum(1 for t in text if t['en'])} phrase(s) sur {len(text)}\n"
+    en.log = (en.log or "") + f"{now} Texte anglais validé par {a.user.username} : {used} phrase(s) sur {len(text)}\n"
     s.commit()
     return job_dict(job, s=s, a=a)
 

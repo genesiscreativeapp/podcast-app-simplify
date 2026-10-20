@@ -236,7 +236,7 @@ def _run_english(en_id: int) -> None:
                 _en_say(en_id, "En attente de la validation du texte anglais")
                 return
         # 2. La voix : référence automatique (meilleur passage du podcast) ou imposée, puis un morceau après l'autre
-        parts = vb.chunks([t["en"].strip() for t in text if t["en"].strip()])
+        parts = vb.chunks([t["en"].strip() for t in text if t["en"].strip() and not t.get("off")])
         if not parts:
             raise RuntimeError("Le texte anglais est vide")
         ref = work / "ref.wav"

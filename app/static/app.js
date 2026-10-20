@@ -479,7 +479,7 @@ const editable = (j) => j.can_edit !== false;  // le serveur refuse de toute fa�
 function jobActions(j, { detail = true, play = false } = {}) {
   return `<div class="actions">
     ${play && j.has_mp3 ? `<button class="btn small ghost" data-act="play" data-id="${j.id}">${ic("play")} Écouter</button>` : ""}
-    ${j.status === "review" && can("jobs.create") && editable(j) ? `<button class="btn small" data-act="review" data-id="${j.id}">${ic("scissors")} Relire les coupes</button>` : ""}
+    ${j.status === "review" && can("jobs.create") && editable(j) ? `<button class="btn small" data-act="review" data-id="${j.id}">${ic("scissors")} Relire le texte</button>` : ""}
     ${enActions(j)}
     ${j.has_mp3 ? `<a class="btn small" href="/api/jobs/${j.id}/file/mp3?download=true">${ic("download")} Télécharger MP3</a>` : ""}
     ${j.on_r2 ? `<button class="btn small ghost" data-act="link" data-id="${j.id}">${ic("link")} Copier le lien</button>` : ""}
@@ -504,8 +504,8 @@ function activeCard(j) {
     const mine = can("jobs.create") && editable(j);
     return `<div class="active-card review" data-id="${j.id}">
       <div class="ring review"><b>✋</b></div>
-      ${head}<div class="ac-step"><b>À valider</b> <small>· ${j.condense_pct} % de réduction visés : relisez les coupes proposées</small></div></div>
-      <div class="ac-actions"><span class="by"></span>${mine ? `<button class="btn small" data-act="review" data-id="${j.id}">${ic("scissors")} Relire les coupes</button>` : ""}
+      ${head}<div class="ac-step"><b>À valider</b> <small>· ${j.condense_pct ? `${j.condense_pct} % de réduction visés : ` : ""}relisez le texte et les coupes</small></div></div>
+      <div class="ac-actions"><span class="by"></span>${mine ? `<button class="btn small" data-act="review" data-id="${j.id}">${ic("scissors")} Relire le texte</button>` : ""}
         ${canStop(j) ? stopBtn(j, j.id) : ""}
         <button class="btn small ghost" data-act="detail" data-id="${j.id}">${ic("info")} Détails</button></div></div>`;
   }
@@ -657,8 +657,8 @@ async function retryDialog(job) {
       <div class="row"><label>Durée du podcast<select name="condense_pct">
           ${[["keep", "Ne pas changer"], ["0", "Durée d'origine"], ["10", "Raccourcir d'environ 10 %"], ["20", "Raccourcir d'environ 20 %"], ["30", "Raccourcir d'environ 30 %"], ["40", "Raccourcir d'environ 40 %"], ["45", "Raccourcir d'environ 45 % (maximum)"]]
             .map(([v, l]) => `<option value="${v}" ${v === "keep" ? "selected" : ""}>${l}</option>`).join("")}</select></label>
-        <label>Coupes proposées<select name="condense_mode"><option value="keep" selected>Ne pas changer</option>
-          <option value="auto">Les appliquer automatiquement</option><option value="review">Me les montrer avant (je valide)</option></select></label></div>
+        <label>Relecture du texte<select name="condense_mode"><option value="keep" selected>Ne pas changer</option>
+          <option value="auto">Publier directement</option><option value="review">Me montrer le texte avant de publier</option></select></label></div>
       ${can("english.create") ? `<label>Version anglaise<select name="english"><option value="keep" selected>Ne pas changer</option><option value="">Non</option>
         <option value="review">Oui — je valide le texte avant la voix</option><option value="auto">Oui — publier automatiquement</option></select></label>
       <label>Traduction de la version anglaise<select name="english_translator">${trOptions(true)}</select></label>` : ""}`,
@@ -705,17 +705,45 @@ async function englishDialog(job) {
 
 async function enReviewDialog(job) {
   const rv = await api(`/api/jobs/${job.id}/english/review`);
+  const useOf = (t) => !t.off && !!t.en.trim();
+  const row = (t) => `<div class="en-row ${useOf(t) ? "" : "off"}" data-id="${t.id}">
+      <label class="en-use" title="Cochée : la voix du prédicateur dira cette phrase"><input type="checkbox" data-use="${t.id}" ${useOf(t) ? "checked" : ""}></label>
+      <div class="en-fr">${esc(t.fr)}</div>
+      <textarea data-en="${t.id}" rows="${Math.max(2, Math.ceil(t.en.length / 70))}">${esc(t.en)}</textarea></div>`;
+  const state_ = (dlg) => {
+    const texts = {}, off = [];
+    dlg.querySelectorAll("[data-en]").forEach((x) => (texts[x.dataset.en] = x.value));
+    dlg.querySelectorAll("[data-use]").forEach((x) => { if (!x.checked) off.push(+x.dataset.use); });
+    return { texts, off };
+  };
   const r = await modal({
     title: `Relire le texte anglais · ${job.title}`, wide: true,
-    body: `<p class="hint">Traduit par : <b>${esc(rv.method || "?")}</b>. <b>La voix du prédicateur dira exactement ce texte</b> : relisez surtout les versets, les noms propres et les termes spirituels. Effacez le texte d'une phrase pour la retirer. ${rv.sentences.length} phrases.</p>
-      <div class="en-list" id="enList">${rv.sentences.map((t) => `<div class="en-row"><div class="en-fr">${esc(t.fr)}</div>
-        <textarea data-en="${t.id}" rows="${Math.max(2, Math.ceil(t.en.length / 70))}">${esc(t.en)}</textarea></div>`).join("")}</div>`,
-    buttons: [{ label: "Annuler", kind: "ghost", value: null }, { label: "Valider et générer la voix", primary: true }],
-    submit: (dlg) => {
-      const texts = {};
-      dlg.querySelectorAll("[data-en]").forEach((t) => (texts[t.dataset.en] = t.value));
-      return api(`/api/jobs/${job.id}/english/review`, { method: "POST", body: { texts } });
+    body: `<p class="hint">Traduit par : <b>${esc(rv.method || "?")}</b>. <b>La voix du prédicateur dira exactement ce texte</b> : relisez surtout les versets, les noms propres et les termes spirituels. Modifiez le texte de chaque phrase, et <b>décochez</b> celles que la voix ne doit pas dire (leur texte est gardé, vous pouvez les recocher). <b>Enregistrez</b> pour continuer plus tard sans rien perdre.</p>
+      <div class="rv-bar"><b id="enSum"></b><span><span id="enDirty" class="rv-dirty" hidden>● modifications non enregistrées</span>
+        <button type="button" class="btn small ghost" id="enSave">💾 Enregistrer</button></span></div>
+      <div class="en-list" id="enList">${rv.sentences.map(row).join("")}</div>`,
+    buttons: [{ label: "Fermer", kind: "ghost", value: null }, { label: "Valider et générer la voix", primary: true }],
+    onMount: (dlg) => {
+      const dirty = (on) => (dlg.querySelector("#enDirty").hidden = !on);
+      const sum = () => {
+        const { off } = state_(dlg), used = [...dlg.querySelectorAll("[data-en]")].filter((x) => x.value.trim() && !off.includes(+x.dataset.en)).length;
+        dlg.querySelector("#enSum").textContent = `${used} phrase(s) lue(s) par la voix sur ${rv.sentences.length}`;
+      };
+      sum();
+      dlg.querySelector("#enList").addEventListener("change", (e) => {
+        if (!e.target.matches("[data-use]")) return;
+        e.target.closest(".en-row").classList.toggle("off", !e.target.checked);
+        dirty(true); sum();
+      });
+      dlg.querySelector("#enList").addEventListener("input", (e) => { if (e.target.matches("[data-en]")) { dirty(true); sum(); } });
+      dlg.querySelector("#enSave").onclick = (ev) => busy(ev.currentTarget, async () => {
+        try {
+          await api(`/api/jobs/${job.id}/english/review`, { method: "POST", body: { ...state_(dlg), validate: false } });
+          dirty(false); toast("Brouillon enregistré", "ok");
+        } catch (err) { toast(err.message, true); }
+      });
     },
+    submit: (dlg) => api(`/api/jobs/${job.id}/english/review`, { method: "POST", body: state_(dlg) }),
   });
   if (r) { toast("Texte validé : la voix va être générée", "ok"); refreshView(); loadStatus(); }
 }
@@ -725,37 +753,52 @@ let rvAudio = null;
 const mmss = (s) => `${Math.floor(s / 60)} min ${String(Math.round(s % 60)).padStart(2, "0")} s`;
 async function reviewDialog(job) {
   const rv = await api(`/api/jobs/${job.id}/review`);
-  const byId = new Map(rv.sentences.map((s) => [s.id, s])), why = new Map(rv.removed.map((r) => [r.id, r])), chosen = new Set(rv.chosen);
+  const byId = new Map(rv.sentences.map((s) => [s.id, s])), why = new Map(rv.removed.map((r) => [r.id, r])), chosen = new Set(rv.chosen);  // chosen = phrases retirées
+  const edits = new Map(rv.sentences.filter((s) => s.edited).map((s) => [s.id, s.edited]));                                              // corrections du texte
+  const cur = (s) => edits.get(s.id) ?? s.text;
   const cut = (id) => byId.get(id).cut[1] - byId.get(id).cut[0];
   const saved = () => [...chosen].reduce((t, id) => t + cut(id), 0);
-  const row = (s) => `<li class="rv-row ${why.has(s.id) ? "proposed" : ""} ${chosen.has(s.id) ? "on" : ""}" data-id="${s.id}">
-      <label><input type="checkbox" data-rv="${s.id}" ${chosen.has(s.id) ? "checked" : ""}>
-        <span class="rv-time">${fmtClockShort(s.start)}</span><span class="rv-text">${esc(s.text)}</span></label>
-      ${why.has(s.id) ? `<small class="rv-why">${esc(why.get(s.id).reason)}${why.get(s.id).by === "IA" ? " · IA" : ""}</small>` : ""}
-      <button type="button" class="icon-btn" data-rv-play="${s.id}" title="Écouter cette phrase (avec 1,5 s de contexte)" aria-label="Écouter">▶</button></li>`;
+  const payload = (removed, validate) => ({ removed, texts: Object.fromEntries(rv.sentences.map((s) => [s.id, cur(s)])), validate });
+  const row = (s) => `<li class="rv-row ${why.has(s.id) ? "proposed" : ""} ${chosen.has(s.id) ? "off" : ""} ${edits.has(s.id) ? "edited" : ""}" data-id="${s.id}">
+      <label class="rv-use" title="Cochée : la phrase est gardée dans le podcast"><input type="checkbox" data-rv="${s.id}" ${chosen.has(s.id) ? "" : "checked"}>
+        <span class="rv-time">${fmtClockShort(s.start)}</span></label>
+      <textarea class="rv-edit" data-rv-text="${s.id}" rows="${Math.max(1, Math.ceil(cur(s).length / 85))}">${esc(cur(s))}</textarea>
+      <div class="rv-side">${why.has(s.id) ? `<small class="rv-why">${esc(why.get(s.id).reason)}${why.get(s.id).by === "IA" ? " · IA" : ""}</small>` : ""}
+        <button type="button" class="icon-btn" data-rv-play="${s.id}" title="Écouter cette phrase (avec 1,5 s de contexte)" aria-label="Écouter">▶</button></div></li>`;
+  const proposals = rv.removed.length > 0;
   const r = await modal({
-    title: `Coupes proposées · ${job.title}`, wide: true,
-    body: `<p class="hint">${rv.method === "heuristique"
+    title: `Relire le texte · ${job.title}`, wide: true,
+    body: `<p class="hint">${!proposals ? "Aucune coupe proposée." : rv.method === "heuristique"
       ? "Sans IA : seules les redites évidentes et les formules de remplissage sont proposées ; l'objectif peut ne pas être atteint, par prudence."
-      : `Proposé par l'IA${rv.method === "IA + heuristique" ? " (complété par les redites évidentes)" : ""}.`}
-      Les phrases cochées seront <b>retirées</b>, dans l'ordre d'origine. Décochez pour garder, cochez pour en retirer d'autres. Le début, la fin, les lectures bibliques et les « Amen » sont protégés par défaut.</p>
+      : `Coupes proposées par l'IA${rv.method === "IA + heuristique" ? " (complétées par les redites évidentes)" : ""}.`}
+      <b>Décochez</b> une phrase pour la retirer du podcast, cochez-la pour la garder. Vous pouvez aussi <b>corriger le texte</b> d'une phrase : l'audio ne change pas (c'est la voix du prédicateur), mais le texte enregistré et la version anglaise partiront du texte corrigé. Le début, la fin, les lectures bibliques et les « Amen » sont protégés par défaut. <b>Enregistrez</b> pour continuer plus tard sans rien perdre.</p>
       ${rv.key_points?.length ? `<details class="rv-points"><summary>Idées principales repérées (vérifiez qu'elles restent toutes)</summary><ul>${rv.key_points.map((p) => `<li>${esc(p)}</li>`).join("")}</ul></details>` : ""}
-      <div class="rv-bar"><label class="check"><input type="checkbox" id="rvOnly" checked> Seulement les phrases proposées ou choisies</label><b id="rvSum"></b></div>
-      <ul class="rv-list only" id="rvList">${rv.sentences.map(row).join("")}</ul>`,
-    buttons: [{ label: "Annuler", kind: "ghost", value: null }, { label: "Tout garder (aucune coupe)", kind: "ghost", value: "keep" },
-      { label: "Valider les coupes", primary: true }],
+      <div class="rv-bar"><label class="check"><input type="checkbox" id="rvOnly" ${proposals ? "checked" : ""}> Seulement les phrases retirées ou corrigées</label>
+        <span><span id="rvDirty" class="rv-dirty" hidden>● modifications non enregistrées</span> <button type="button" class="btn small ghost" id="rvSave">💾 Enregistrer</button></span></div>
+      <div class="rv-bar"><b id="rvSum"></b></div>
+      <ul class="rv-list ${proposals ? "only" : ""}" id="rvList">${rv.sentences.map(row).join("")}</ul>`,
+    buttons: [{ label: "Fermer", kind: "ghost", value: null }, { label: "Tout garder (aucune coupe)", kind: "ghost", value: "keep" },
+      { label: "Valider le texte", primary: true }],
     onMount: (dlg) => {
-      const list = dlg.querySelector("#rvList"), sum = () => {
+      const list = dlg.querySelector("#rvList"), dirty = (on) => (dlg.querySelector("#rvDirty").hidden = !on), sum = () => {
         const s = saved();
-        dlg.querySelector("#rvSum").textContent = `${chosen.size} phrase(s) · −${mmss(s)} (−${(100 * s / Math.max(rv.total_s, 1)).toFixed(0)} %, objectif −${rv.pct} %)${rv.coverage != null ? ` · idées conservées : ${Math.round(100 * rv.coverage)} % (avant vos changements)` : ""}`;
+        dlg.querySelector("#rvSum").textContent = `${rv.sentences.length - chosen.size} phrase(s) gardée(s) sur ${rv.sentences.length} · ${chosen.size} retirée(s)${chosen.size ? ` : −${mmss(s)} (−${(100 * s / Math.max(rv.total_s, 1)).toFixed(0)} %${rv.pct ? `, objectif −${rv.pct} %` : ""})` : ""} · ${edits.size} corrigée(s)${rv.coverage != null ? ` · idées conservées : ${Math.round(100 * rv.coverage)} % (avant vos changements)` : ""}`;
       };
       sum();
       dlg.querySelector("#rvOnly").onchange = (e) => list.classList.toggle("only", e.target.checked);
       list.addEventListener("change", (e) => {
+        if (!e.target.matches("[data-rv]")) return;
         const id = +e.target.dataset.rv;
-        e.target.checked ? chosen.add(id) : chosen.delete(id);
-        e.target.closest(".rv-row").classList.toggle("on", e.target.checked);
-        sum();
+        e.target.checked ? chosen.delete(id) : chosen.add(id);
+        e.target.closest(".rv-row").classList.toggle("off", !e.target.checked);
+        dirty(true); sum();
+      });
+      list.addEventListener("input", (e) => {
+        if (!e.target.matches("[data-rv-text]")) return;
+        const id = +e.target.dataset.rvText, v = e.target.value.trim();
+        v && v !== byId.get(id).text ? edits.set(id, v) : edits.delete(id);
+        e.target.closest(".rv-row").classList.toggle("edited", edits.has(id));
+        dirty(true); sum();
       });
       list.addEventListener("click", (e) => {
         const b = e.target.closest("[data-rv-play]");
@@ -765,12 +808,18 @@ async function reviewDialog(job) {
         rvAudio = new Audio(`/api/jobs/${job.id}/review/clip?start=${Math.max(s.start - 1.5, 0)}&end=${s.end + 1.5}`);
         rvAudio.play().catch(() => toast("Audio indisponible", true));
       });
+      dlg.querySelector("#rvSave").onclick = (ev) => busy(ev.currentTarget, async () => {
+        try {
+          await api(`/api/jobs/${job.id}/review`, { method: "POST", body: payload([...chosen], false) });
+          dirty(false); toast("Brouillon enregistré", "ok");
+        } catch (err) { toast(err.message, true); }
+      });
     },
-    submit: (dlg) => api(`/api/jobs/${job.id}/review`, { method: "POST", body: { removed: [...chosen] } }),
+    submit: (dlg) => api(`/api/jobs/${job.id}/review`, { method: "POST", body: payload([...chosen], true) }),
   });
   rvAudio?.pause();
-  if (r === "keep") await api(`/api/jobs/${job.id}/review`, { method: "POST", body: { removed: [] } });
-  if (r) { toast("Coupes validées : le traitement reprend", "ok"); refreshView(); loadStatus(); }
+  if (r === "keep") await api(`/api/jobs/${job.id}/review`, { method: "POST", body: payload([], true) });
+  if (r) { toast("Texte validé : le traitement reprend", "ok"); refreshView(); loadStatus(); }
 }
 const fmtClockShort = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 
@@ -1664,10 +1713,8 @@ form.onsubmit = async (e) => {
 };
 setSource("url");
 // le choix « me montrer les coupes avant » n'a de sens que si on raccourcit
-$("jobCondense").onchange = () => ($("jobModeBox").hidden = $("jobCondense").value === "0");
 form.english.onchange = () => ($("jobTrBox").hidden = !form.english.value);  // le traducteur n'a de sens que si la version anglaise est demandée
 $("batchEnglish").onchange = () => ($("batchTrBox").hidden = !$("batchEnglish").value);
-$("batchCondense").onchange = () => ($("batchModeBox").hidden = $("batchCondense").value === "0");
 
 // ---------- Traitement par lot : liens et fichiers à préparer ----------
 // Une ligne = un traitement, avec son propre nom, sa date, ses bornes et son intro.
@@ -1942,8 +1989,8 @@ async function openDetail(id, silent = false) {
       ${can("folders.manage") && editable(j) ? `<button class="btn small ghost" data-act="rename" data-id="${j.id}">${ic("edit")} Renommer</button>` : ""}
       <span class="badge ${j.status}">${LABELS[j.status]}</span> ${enBadge(j)}</div>
     ${liveBlock(j)}
-    ${j.status === "review" && can("jobs.create") && editable(j) ? `<div class="review-note"><span>✋ Des coupes de condensation attendent votre validation.</span>
-      <button class="btn small" data-act="review" data-id="${j.id}">${ic("scissors")} Relire les coupes</button></div>` : ""}
+    ${j.status === "review" && can("jobs.create") && editable(j) ? `<div class="review-note"><span>✋ Le texte attend votre relecture (corrections, phrases à garder ou à retirer).</span>
+      <button class="btn small" data-act="review" data-id="${j.id}">${ic("scissors")} Relire le texte</button></div>` : ""}
     ${j.error ? `<div class="err-box">${esc(j.error)}</div>` : ""}
     <div class="tabs" role="tablist" aria-label="Détails du traitement">${tabs.map(([k, l]) =>
       `<button type="button" role="tab" data-dtab="${k}" class="${state.detailTab === k ? "active" : ""}" aria-selected="${state.detailTab === k}">${esc(l)}</button>`).join("")}</div>
@@ -1966,7 +2013,7 @@ async function openDetail(id, silent = false) {
       ${row("Durée de la vidéo", j.duration_source)}` : ""}
       ${row("Durée du podcast", j.duration_output)}
       ${row("Taille", j.size_mp3 ? fmtSize(j.size_mp3) : "")}
-      ${row("Condensation", j.condense_pct ? `−${j.condense_pct} % visés, ${j.condense_mode === "review" ? "coupes validées par l'utilisateur" : "coupes appliquées automatiquement"}` : "")}
+      ${row("Condensation", j.condense_pct ? `−${j.condense_pct} % visés, ${j.condense_mode === "review" ? "coupes validées par l'utilisateur" : "coupes appliquées automatiquement"}` : j.condense_mode === "review" ? "Texte relu par l'utilisateur" : "")}
       ${row("Tokens IA", j.tokens_in || j.tokens_out ? `${fmtTok(j.tokens_in + j.tokens_out)} (${fmtTok(j.tokens_in)} envoyés · ${fmtTok(j.tokens_out)} reçus)` : "")}
       ${row("Créé par", esc(j.created_by || ""))}
       ${row("Créé le", fmtDate(j.created_at))}

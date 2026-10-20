@@ -206,6 +206,10 @@ rv = ok(bob.get("/api/jobs/1/english/review"))
 assert rv["engine"] == "dummy" and rv["method"] == "modèle local" and [t["en"] for t in rv["sentences"]][0] == "EN " + FR[0]
 assert ok(bob.get("/api/status"))["review"] == 1
 assert eve.get("/api/jobs/1/english/review").status_code == 403 and ok(admin.get("/api/jobs/1/english/review"))
+ok(bob.post("/api/jobs/1/english/review", json={"texts": {"0": "Brothers, God is good."}, "off": [1], "validate": False}))   # brouillon
+assert state(en_id)["status"] == "review" and spoken == []                                  # la voix n'est pas lancée
+rv = ok(bob.get("/api/jobs/1/english/review"))
+assert rv["sentences"][0]["en"] == "Brothers, God is good." and rv["sentences"][1]["off"] is True and rv["sentences"][1]["en"] == "EN " + FR[1]   # phrase décochée : texte gardé
 ok(bob.post("/api/jobs/1/english/review", json={"texts": {"0": "Brothers, God is good.", "1": ""}}), 200)    # corrige la 0, retire la 1
 assert state(en_id)["status"] == "pending" and state(en_id)["review_ok"] is True
 ok(bob.get("/api/jobs/1/english/review"), 400)                                              # déjà validé
@@ -218,6 +222,18 @@ with SessionLocal() as s:
     s.query(EnVersion).update({"status": "review", "review_ok": False})
     s.commit()
 ok(bob.post("/api/jobs/1/english/review", json={"texts": {str(i): "" for i in range(4)}}), 400)   # texte entièrement vide refusé
+
+# 2b. sélection : les phrases décochées ne sont pas dites, mais leur texte reste
+en_id = prepare("review")
+spoken.clear()
+voicelab.claim_english()
+voicelab.run_english(en_id)
+ok(bob.post("/api/jobs/1/english/review", json={"texts": {}, "off": list(range(4))}), 400)   # tout décocher est refusé
+ok(bob.post("/api/jobs/1/english/review", json={"texts": {}, "off": [0, 1]}))
+voicelab.claim_english()
+voicelab.run_english(en_id)
+assert state(en_id)["status"] == "done" and " ".join(spoken) == f"EN {FR[2]} EN {FR[3]}"
+assert [t.get("off") for t in json.loads(state(en_id)["text_json"])] == [True, True, None, None]
 
 # 3. reprise après une panne : les morceaux déjà faits sont conservés, seuls les autres sont refaits
 en_id = prepare("auto")

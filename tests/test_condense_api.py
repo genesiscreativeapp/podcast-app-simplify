@@ -80,11 +80,21 @@ assert eve.get(f"/api/jobs/{jid}/review/clip", params={"start": 0, "end": 1}).st
 # --- validation : droits, identifiants inconnus ignorés, le traitement repart
 assert nocreate.post(f"/api/jobs/{jid}/review", json={"removed": []}).status_code == 403
 assert eve.post(f"/api/jobs/{jid}/review", json={"removed": [3]}).status_code == 404
+# brouillon : enregistré sans valider ; une correction du texte est gardée à côté de l'original ; on ne peut pas tout retirer
+d = ok(bob.post(f"/api/jobs/{jid}/review", json={"removed": [3, 5], "texts": {"2": "Phrase corrigée."}, "validate": False}))
+assert d["status"] == "review"
+rv2 = ok(bob.get(f"/api/jobs/{jid}/review"))
+assert rv2["chosen"] == [3, 5] and rv2["sentences"][2]["edited"] == "Phrase corrigée." and rv2["sentences"][2]["text"] != "Phrase corrigée."
+d = ok(bob.post(f"/api/jobs/{jid}/review", json={"removed": [3], "texts": {"2": rv2["sentences"][2]["text"]}, "validate": False}))   # retour à l'original
+assert "edited" not in ok(bob.get(f"/api/jobs/{jid}/review"))["sentences"][2]
+ok(bob.post(f"/api/jobs/{jid}/review", json={"removed": list(range(10))}), 400)
+ok(bob.post(f"/api/jobs/{jid}/review", json={"removed": [3], "texts": {"2": "Phrase corrigée."}, "validate": False}))
 d = ok(bob.post(f"/api/jobs/{jid}/review", json={"removed": [3, 5, 999]}))               # il garde la 3, ajoute la 5, retire la 7 ; 999 n'existe pas
 assert d["status"] == "pending" and d["step"].startswith("Validé")
 with SessionLocal() as s:
     jj = s.get(Job, jid)
-    assert jj.review_ok is True and json.loads(jj.review_json)["chosen"] == [3, 5] and "Coupes validées : 2 phrase(s)" in jj.log
+    assert jj.review_ok is True and json.loads(jj.review_json)["chosen"] == [3, 5] and "Texte validé : 2 phrase(s) retirée(s)" in jj.log
+    assert json.loads(jj.review_json)["sentences"][2]["edited"] == "Phrase corrigée." and "Brouillon enregistré" in jj.log   # la correction survit à la validation
 ok(bob.post(f"/api/jobs/{jid}/review", json={"removed": []}), 400)                       # déjà validé : plus de validation possible
 ok(bob.get(f"/api/jobs/{jid}/review"), 400)
 

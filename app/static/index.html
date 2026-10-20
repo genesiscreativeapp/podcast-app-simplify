@@ -293,10 +293,10 @@
                   <select name="english_translator" id="jobTr"></select>
                   <span class="hint">Le modèle libre local reste le choix par défaut ; notre IA configurée traduit mieux le ton oral, et le modèle local prend le relais si elle ne répond pas.</span>
                 </label>
-                <label class="full" id="jobModeBox" hidden>Coupes proposées
+                <label class="full" id="jobModeBox">Relecture du texte
                   <select name="condense_mode">
-                    <option value="auto">Les appliquer automatiquement</option>
-                    <option value="review">Me les montrer avant de publier (je valide)</option>
+                    <option value="auto">Publier directement (les coupes proposées sont appliquées)</option>
+                    <option value="review">Me montrer le texte avant de publier : je relis, je corrige, je choisis les phrases</option>
                   </select>
                 </label>
                 <details class="full">
@@ -346,10 +346,10 @@
                 <label id="batchTrBox" hidden>Traduction de la version anglaise
                   <select id="batchTr"></select>
                 </label>
-                <label id="batchModeBox" hidden>Coupes proposées
+                <label id="batchModeBox">Relecture du texte
                   <select id="batchMode">
-                    <option value="auto">Les appliquer automatiquement</option>
-                    <option value="review">Me les montrer avant de publier (je valide)</option>
+                    <option value="auto">Publier directement</option>
+                    <option value="review">Me montrer le texte avant de publier</option>
                   </select>
                 </label>
                 <div class="source-switch" id="batchSource" role="group" aria-label="Ajouter des liens ou des fichiers">

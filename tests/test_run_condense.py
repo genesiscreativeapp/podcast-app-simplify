@@ -77,7 +77,7 @@ rev = json.loads(j.review_json)
 assert {70, 74, 80} <= {r["id"] for r in rev["removed"]} and rev["chosen"] == [r["id"] for r in rev["removed"]] and rev["method"] == "heuristique"
 assert rev["saved_s"] >= rev["target_s"] and 0 < rev["coverage"] <= 1
 assert len(rev["sentences"]) == N and rev["key_points"] is None and rev["pct"] == 10
-assert abs(j.progress - R.steps.BY_KEY["condense"][2]) < 1e-9 and "En attente de la validation" in j.log
+assert abs(j.progress - R.steps.BY_KEY["condense"][2]) < 1e-9 and "En attente de la relecture" in j.log
 
 # 2. l'utilisateur garde la redite 74 (la retire de la sélection) et valide : le traitement reprend et se termine
 rev["chosen"] = [70, 80]
@@ -126,11 +126,14 @@ with SessionLocal() as s:
 R.run_job(4)
 assert job(4).status == "review" and job(4).review_ok is False and (config.WORK_DIR / "4" / "analysis.json").exists()
 
-# 6. texte trop court pour juger : pas de pause, pas de coupe
+# 6. texte trop court pour juger : aucune coupe proposée ; en mode relecture, le texte est tout de même montré
 R.transcribe_words = lambda wav, dur, cb=None, cache=None: [{"start": 0, "end": 3, "text": "", "words": words[:30]}]
 new_job(5, 20, "review")
 R.run_job(5)
-assert job(5).status == "done" and "trop court" in job(5).log and "condensation" not in job(5).edit_note
+assert job(5).status == "review" and "trop court" in job(5).log and json.loads(job(5).review_json)["removed"] == []
+new_job(15, 20, "auto")                                                             # en automatique : comme avant, ni pause ni coupe
+R.run_job(15)
+assert job(15).status == "done" and "trop court" in job(15).log and "condensation" not in job(15).edit_note
 
 # 7. version anglaise demandée avec le traitement : mise en file à la fin, avec les réglages par défaut
 R.transcribe_words = lambda wav, dur, cb=None, cache=None: [{"start": 0, "end": TOTAL, "text": "", "words": words}]
@@ -219,4 +222,23 @@ with SessionLocal() as s:
     s.commit()
 R.run_job(11)                                                                       # la demande arrive avant la première étape : il se met en pause
 assert job(11).status == "paused"
+
+# 9. relecture du texte sans condensation : toutes les phrases sont montrées, l'utilisateur en retire une et en corrige une autre
+R.transcribe_words = lambda wav, dur, cb=None, cache=None: [{"start": 0, "end": TOTAL, "text": "", "words": words}]
+new_job(12, 0, "review")
+R.run_job(12)
+j = job(12)
+rv = json.loads(j.review_json)
+assert j.status == "review" and rv["pct"] == 0 and rv["removed"] == [] and rv["chosen"] == [] and len(rv["sentences"]) == N and rv["coverage"] is None
+rv["sentences"][5]["edited"] = "Texte corrigé par l'utilisateur."
+rv["chosen"] = [80]
+with SessionLocal() as s:
+    jj = s.get(Job, 12)
+    jj.review_json, jj.review_ok, jj.status = json.dumps(rv), True, "pending"
+    s.commit()
+R.run_job(12)
+j = job(12)
+tr = json.loads(j.transcript_json)
+assert j.status == "done" and "relecture : 1 phrase(s) retirée(s)" in j.edit_note
+assert len(tr) == N - 1 and "Texte corrigé par l'utilisateur." in tr and not any("Vous" in x for x in tr)
 print("ok")

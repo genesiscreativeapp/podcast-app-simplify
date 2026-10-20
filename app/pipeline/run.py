@@ -220,23 +220,42 @@ def _analyse(rep: Reporter, work: Path, jb, llm: dict | None):
     return clean, words, extra_cuts, offtopic_note
 
 
-def _final_text(words: list[dict], cuts: list[tuple[float, float]]) -> list[str]:
+def _final_text(words: list[dict], cuts: list[tuple[float, float]], review: dict | None = None) -> list[str]:
     """Texte final du podcast, phrase par phrase : les mots qui ne sont pas dans une coupe (témoignages, condensation, « euh », redites).
-    Il sert de base à la version anglaise : on ne traduit que ce qui est réellement dit dans le podcast."""
-    kept = [w for w in words if not any(a <= (w["start"] + w["end"]) / 2 <= b for a, b in cuts)]
-    return [s["text"] for s in condense.build_sentences(kept)]
+    Il sert de base à la version anglaise : on ne traduit que ce qui est réellement dit dans le podcast.
+    Les phrases corrigées par l'utilisateur à la relecture (`edited`) remplacent le texte reconnu ; l'audio, lui, ne change pas."""
+    mid = lambda w: (w["start"] + w["end"]) / 2  # noqa: E731
+    kept = [w for w in words if not any(a <= mid(w) <= b for a, b in cuts)]
+    sents = review["sentences"] if review else []
+    if not any(s.get("edited") for s in sents):
+        return [s["text"] for s in condense.build_sentences(kept)]
+    removed, out = set(review["chosen"]), []
+    for s in sents:
+        if s["id"] in removed:
+            continue
+        text = s.get("edited") or " ".join(w["word"].strip() for w in kept if s["start"] <= mid(w) <= s["end"])
+        if text:
+            out.append(text)
+    return out
 
 
 def _condense(rep: Reporter, jb, words, extra_cuts, llm: dict | None) -> dict | None:
     """Propose les phrases à retirer (avec ou sans IA). → la relecture {phrases, coupes proposées…}, ou None si le texte est trop court."""
     rep.step("condense")
     sents = condense.build_sentences(words, extra_cuts)
-    if len(sents) < MIN_SENTENCES:
-        rep.log("Condensation : texte trop court pour juger de ce qui est redondant, rien n'est retiré")
+    if not sents:
         return None
-    prop = condense.propose(sents, jb.pct, llm, rep.log, rep.tokens)
-    rep.log(f"Condensation visée : −{jb.pct} % ({fmt_time(prop['target_s'])}) ; proposé : {len(prop['removed'])} phrase(s), "
-            f"{fmt_time(prop['saved_s'])} soit −{100 * prop['saved_s'] / max(prop['total_s'], 1):.0f} % — {prop['method']} ; idées conservées : {100 * prop['coverage']:.0f} %")
+    if jb.pct and len(sents) >= MIN_SENTENCES:
+        prop = condense.propose(sents, jb.pct, llm, rep.log, rep.tokens)
+        rep.log(f"Condensation visée : −{jb.pct} % ({fmt_time(prop['target_s'])}) ; proposé : {len(prop['removed'])} phrase(s), "
+                f"{fmt_time(prop['saved_s'])} soit −{100 * prop['saved_s'] / max(prop['total_s'], 1):.0f} % — {prop['method']} ; idées conservées : {100 * prop['coverage']:.0f} %")
+    else:  # pas de condensation demandée, ou texte trop court : aucune coupe proposée (la relecture reste possible si l'utilisateur l'a demandée)
+        if jb.pct:
+            rep.log("Condensation : texte trop court pour juger de ce qui est redondant, rien n'est retiré")
+        if jb.mode != "review":
+            return None
+        prop = {"method": "", "target_s": 0.0, "total_s": round(sum(condense.duration(s) for s in sents), 1), "saved_s": 0.0,
+                "coverage": None, "key_points": None, "removed": {}}
     return {"pct": jb.pct, "method": prop["method"], "target_s": prop["target_s"], "total_s": prop["total_s"], "saved_s": prop["saved_s"],
             "coverage": prop["coverage"], "key_points": prop["key_points"], "sentences": sents,
             "removed": [{"id": i, **r} for i, r in prop["removed"].items()], "chosen": list(prop["removed"])}
@@ -282,19 +301,19 @@ def run_job(job_id: int) -> None:
         if resume and jb.review_json:  # coupes déjà proposées (et validées si l'utilisateur devait le faire)
             review = json.loads(jb.review_json)
         else:
-            review = _condense(rep, jb, words, extra_cuts, llm) if jb.pct else None
-            if review and jb.mode == "review" and review["removed"]:
+            review = _condense(rep, jb, words, extra_cuts, llm) if (jb.pct or jb.mode == "review") else None
+            if review and jb.mode == "review":
                 # validation humaine : on garde l'audio nettoyé et l'analyse, le traitement s'arrête ici sans occuper de place
-                rep._update(status="review", step="À valider : coupes proposées", progress=steps.BY_KEY["condense"][2],
+                rep._update(status="review", step="À valider : texte et coupes", progress=steps.BY_KEY["condense"][2],
                             review_json=json.dumps(review), review_ok=False)
-                rep.log("En attente de la validation des coupes proposées")
+                rep.log("En attente de la relecture du texte et des coupes")
                 paused = True
                 return
 
         cond_cuts, cond_note = [], ""
         if review:  # coupes de condensation : toutes celles proposées (automatique) ou celles que l'utilisateur a gardées
             cond_cuts = condense.cuts_for(review["sentences"], review["chosen"])
-            cond_note = (f"condensation : {len(cond_cuts)} phrase(s) retirée(s), {fmt_time(sum(b - a for a, b in cond_cuts))} "
+            cond_note = (f"{'condensation' if jb.pct else 'relecture'} : {len(cond_cuts)} phrase(s) retirée(s), {fmt_time(sum(b - a for a, b in cond_cuts))} "
                          f"({review['method']}" + (", validée" if jb.review_ok else "") + ")")
             rep._update(review_json=json.dumps(review))
 
@@ -319,7 +338,7 @@ def run_job(job_id: int) -> None:
         rep._update(edit_note="\n".join(note))
 
         w_cuts, _ = word_cuts(words, config.REMOVE_FILLERS, config.REMOVE_REPEATS, config.REPEAT_MAX_GAP, config.REPEAT_MAX_WORDS)
-        rep._update(transcript_json=json.dumps(_final_text(words, w_cuts + stats["reaction_cuts"] + extra_cuts + cond_cuts), ensure_ascii=False))
+        rep._update(transcript_json=json.dumps(_final_text(words, w_cuts + stats["reaction_cuts"] + extra_cuts + cond_cuts, review), ensure_ascii=False))
 
         # 4. Intro + normalisation du volume
         rep.step("master")
