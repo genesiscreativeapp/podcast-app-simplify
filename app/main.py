@@ -62,7 +62,7 @@ def acl(request: Request, s=Depends(db)) -> Access:
 
 # --- Sérialisation ---------------------------------------------------------------
 def folder_dict(f: Folder) -> dict:
-    return {"id": f.id, "name": f.name, "parent_id": f.parent_id, "intro_id": f.intro_id}
+    return {"id": f.id, "name": f.name, "parent_id": f.parent_id, "intro_id": f.intro_id, "intro_en_id": f.intro_en_id}
 
 
 def job_steps(j: Job, ai: bool) -> list[dict]:
@@ -83,6 +83,8 @@ def job_steps(j: Job, ai: bool) -> list[dict]:
 def _en_dict(en: EnVersion, full_log: bool = False) -> dict:
     """État d'une version anglaise, pour les listes et la fenêtre de détails."""
     return {"id": en.id, "job_id": en.job_id, "status": en.status, "step": en.step, "progress": round(en.progress or 0, 3), "mode": en.mode,
+            "stopping": bool(en.stop_requested and en.status == "running"),
+            "pausing": bool(en.pause_requested and not en.stop_requested and en.status == "running"),
             "translator": en.translator, "engine": en.engine, "method": en.method, "error": en.error, "ref_start": en.ref_start,
             "has_mp3": bool(en.local_mp3 and Path(en.local_mp3).exists()), "on_r2": bool(en.r2_key_mp3), "size_mp3": en.size_mp3,
             "duration": en.duration_output, "created_by": en.created_by, "finished_at": en.finished_at.isoformat() if en.finished_at else None,
@@ -96,6 +98,8 @@ def job_dict(j: Job, with_log: bool = False, s=None, a: Access | None = None) ->
         "id": j.id, "folder_id": j.folder_id, "intro_id": j.intro_id, "youtube_url": j.youtube_url,
         "title": j.title, "date": j.date, "filename": j.filename,
         "status": j.status, "step": j.step, "progress": round(j.progress or 0, 3),
+        "stopping": bool(j.stop_requested and j.status == "running"),
+        "pausing": bool(j.pause_requested and not j.stop_requested and j.status == "running"),
         "error": j.error, "video_title": j.video_title,
         "start_override": fmt_time(j.start_override), "end_override": fmt_time(j.end_override),
         "sermon_start": fmt_time(j.sermon_start), "sermon_end": fmt_time(j.sermon_end),
@@ -251,22 +255,31 @@ def set_folder_access(folder_id: int, body: AccessIn, s=Depends(db)):
 
 
 class FolderIntro(BaseModel):
-    intro_id: int | None = None  # None = hériter du parent / intro par défaut
+    intro_id: int | None = None  # intro du podcast français ; None = hériter du parent / intro par défaut
+    intro_en_id: int | None = None  # idem pour la version anglaise ; seuls les champs envoyés sont modifiés
 
 
 @app.put("/api/folders/{folder_id}/intro", dependencies=[Depends(auth.need("folders.manage"))])
 def set_folder_intro(folder_id: int, body: FolderIntro, s=Depends(db), a: Access = Depends(acl)):
     f = a.need_folder_edit(folder_id)
-    if body.intro_id is not None and not s.get(Intro, body.intro_id):
-        raise HTTPException(404, "Intro introuvable")
-    f.intro_id = body.intro_id
+    for field, lang in (("intro_id", "fr"), ("intro_en_id", "en")):
+        value = getattr(body, field)
+        if field not in body.model_fields_set:
+            continue
+        if value is not None:
+            i = s.get(Intro, value)
+            if not i:
+                raise HTTPException(404, "Intro introuvable")
+            if i.lang != lang:
+                raise HTTPException(400, f"Cette intro n'est pas une intro {'française' if lang == 'fr' else 'anglaise'}")
+        setattr(f, field, value)
     s.commit()
     return folder_dict(f)
 
 
 # --- Bibliothèque d'intros (MP3) -----------------------------------------------------
 def intro_dict(i: Intro) -> dict:
-    return {"id": i.id, "name": i.name, "is_default": i.is_default,
+    return {"id": i.id, "name": i.name, "is_default": i.is_default, "lang": i.lang,
             "duration": fmt_time(i.duration) if i.duration else ""}
 
 
@@ -277,12 +290,14 @@ class IntroPatch(BaseModel):
 
 @app.get("/api/intros", dependencies=[Depends(auth.need("jobs.view"))])
 def list_intros(s=Depends(db)):
-    return [intro_dict(i) for i in s.query(Intro).order_by(Intro.is_default.desc(), Intro.name).all()]
+    return [intro_dict(i) for i in s.query(Intro).order_by(Intro.lang.desc(), Intro.is_default.desc(), Intro.name).all()]
 
 
 @app.post("/api/intros", dependencies=[Depends(auth.need("intros.manage"))])
-def upload_intro(file: UploadFile = File(...), name: str = Form(""), is_default: bool = Form(False),
+def upload_intro(file: UploadFile = File(...), name: str = Form(""), is_default: bool = Form(False), lang: str = Form("fr"),
                  s=Depends(db)):
+    if lang not in ("fr", "en"):
+        raise HTTPException(400, "Langue de l'intro : fr ou en")
     if Path(file.filename or "").suffix.lower() != ".mp3":
         raise HTTPException(400, "L'intro doit être un fichier MP3")
     dest = config.INTRO_DIR / f"intro_{secrets.token_hex(6)}.mp3"
@@ -298,13 +313,13 @@ def upload_intro(file: UploadFile = File(...), name: str = Form(""), is_default:
     except HTTPException:
         dest.unlink(missing_ok=True)
         raise
-    first = s.query(Intro).count() == 0
+    first = s.query(Intro).filter(Intro.lang == lang).count() == 0
     intro = Intro(name=name.strip() or Path(file.filename).stem, path=str(dest), duration=duration,
-                  is_default=False)
+                  is_default=False, lang=lang)
     s.add(intro)
     s.flush()
-    if is_default or first:  # la première intro devient l'intro par défaut
-        s.query(Intro).update({"is_default": False})
+    if is_default or first:  # la première intro d'une langue devient l'intro par défaut de cette langue
+        s.query(Intro).filter(Intro.lang == lang).update({"is_default": False})
         intro.is_default = True
     s.commit()
     return intro_dict(intro)
@@ -318,7 +333,7 @@ def update_intro(intro_id: int, body: IntroPatch, s=Depends(db)):
             raise HTTPException(400, "Nom vide")
         intro.name = body.name.strip()
     if body.is_default:
-        s.query(Intro).update({"is_default": False})
+        s.query(Intro).filter(Intro.lang == intro.lang).update({"is_default": False})
         intro.is_default = True
     s.commit()
     return intro_dict(intro)
@@ -329,6 +344,7 @@ def delete_intro(intro_id: int, s=Depends(db)):
     intro = s.get(Intro, intro_id) or _404("Intro")
     # Les dossiers et traitements qui l'utilisaient repassent en « automatique »
     s.query(Folder).filter(Folder.intro_id == intro_id).update({"intro_id": None})
+    s.query(Folder).filter(Folder.intro_en_id == intro_id).update({"intro_en_id": None})
     s.query(Job).filter(Job.intro_id == intro_id).update({"intro_id": None})
     Path(intro.path).unlink(missing_ok=True)
     s.delete(intro)
@@ -413,8 +429,11 @@ def _check_ai_user(s, a: Access, value: str | None) -> str | None:
 
 
 def _check_intro(s, intro_id):
-    if intro_id and not s.get(Intro, intro_id):
+    i = s.get(Intro, intro_id) if intro_id else None
+    if intro_id and not i:
         raise HTTPException(404, "Intro introuvable")
+    if i and i.lang != "fr":
+        raise HTTPException(400, "Le podcast français ne peut pas utiliser une intro anglaise")
 
 
 def _times(start, end):
@@ -620,7 +639,7 @@ def history(q: str = "", status: str = "", limit: int = 50, offset: int = 0, s=D
     """Historique de tous les traitements, tous dossiers confondus (le plus récent d'abord)."""
     query = a.jobs(s.query(Job))
     if status == "active":
-        query = query.filter(Job.status.in_(["pending", "running", "review"]))
+        query = query.filter(Job.status.in_(["pending", "running", "review", "paused"]))
     elif status in ("done", "error"):
         query = query.filter(Job.status == status)
     if q.strip():
@@ -651,6 +670,71 @@ def get_job(job_id: int, s=Depends(db), a: Access = Depends(acl)):
     d["links_public"] = bool(config.R2_PUBLIC_BASE_URL)
     d["links_days"] = max(config.R2_LINK_EXPIRES // 86400, 1)
     return d
+
+
+# --- Arrêt d'une opération en cours -----------------------------------------------------------------------------
+def _stop(s, model, row, what: str, user: str, log_attr: str = "log") -> None:
+    """En attente ou à valider : arrêté tout de suite. En cours : l'arrêt est demandé, le calcul s'interrompt à son prochain point de contrôle."""
+    now = datetime.utcnow()
+    idle = s.query(model).filter(model.id == row.id, model.status.in_(["pending", "review", "paused"])).update(
+        {"status": "error", "step": "Arrêté", "error": "Arrêté par l'utilisateur", "finished_at": now}, synchronize_session=False)
+    if not idle and not s.query(model).filter(model.id == row.id, model.status == "running").update({"stop_requested": True}, synchronize_session=False):
+        raise HTTPException(400, f"Cette {what} n'est pas en cours")
+    s.commit()
+    s.refresh(row)
+    setattr(row, log_attr, (getattr(row, log_attr) or "") + f"[{datetime.now():%H:%M:%S}] Arrêt demandé par {user}\n")
+    s.commit()
+
+
+def _pause(s, model, row, what: str, user: str) -> None:
+    """En file : mis en pause tout de suite. En cours : pause demandée, le travail déjà fait est gardé et le calcul s'interrompt à son prochain point de contrôle."""
+    fields = {"status": "paused", "step": "En pause"}
+    if model is EnVersion:
+        fields["finished_at"] = datetime.utcnow()  # sert à l'expiration d'une pause oubliée
+    idle = s.query(model).filter(model.id == row.id, model.status == "pending").update(fields, synchronize_session=False)
+    if not idle and not s.query(model).filter(model.id == row.id, model.status == "running", model.stop_requested.is_(False)).update(
+            {"pause_requested": True}, synchronize_session=False):
+        raise HTTPException(400, f"Cette {what} ne peut pas être mise en pause (en file ou en cours seulement)")
+    s.commit()
+    s.refresh(row)
+    row.log = (row.log or "") + f"[{datetime.now():%H:%M:%S}] Pause demandée par {user}\n"
+    s.commit()
+
+
+def _resume(s, model, row, what: str, user: str) -> None:
+    fields = {"status": "pending", "step": "Reprise", "pause_requested": False, "stop_requested": False}
+    if model is Job:
+        fields["updated_at"] = row.created_at or datetime.utcnow()  # il a déjà attendu : il repart devant les nouveaux
+    if not s.query(model).filter(model.id == row.id, model.status == "paused").update(fields, synchronize_session=False):
+        raise HTTPException(400, f"Cette {what} n'est pas en pause")
+    s.commit()
+    s.refresh(row)
+    row.log = (row.log or "") + f"[{datetime.now():%H:%M:%S}] Reprise demandée par {user}\n"
+    s.commit()
+
+
+@app.post("/api/jobs/{job_id}/pause", dependencies=[Depends(auth.need("jobs.create"))])
+def pause_job(job_id: int, s=Depends(db), a: Access = Depends(acl)):
+    _pause(s, Job, a.need_job(s, job_id, edit=True), "opération", a.user.username)
+    return job_dict(a.need_job(s, job_id), s=s, a=a)
+
+
+@app.post("/api/jobs/{job_id}/resume", dependencies=[Depends(auth.need("jobs.create"))])
+def resume_job(job_id: int, s=Depends(db), a: Access = Depends(acl)):
+    """Reprend un traitement en pause là où il s'était arrêté (aucun réglage ne change : pour cela, « Relancer »)."""
+    _resume(s, Job, a.need_job(s, job_id, edit=True), "opération", a.user.username)
+    return job_dict(a.need_job(s, job_id), s=s, a=a)
+
+
+@app.post("/api/jobs/{job_id}/stop", dependencies=[Depends(auth.need("jobs.create"))])
+def stop_job(job_id: int, s=Depends(db), a: Access = Depends(acl)):
+    """Arrête un traitement en attente, à valider ou en cours (il passe en erreur « Arrêté » ; « Relancer » le reprend de zéro)."""
+    job = a.need_job(s, job_id, edit=True)
+    was = job.status
+    _stop(s, Job, job, "opération", a.user.username)
+    if was in ("pending", "review", "paused"):
+        shutil.rmtree(config.WORK_DIR / str(job.id), ignore_errors=True)  # un traitement à valider ou en pause gardait son travail
+    return job_dict(job, s=s, a=a)
 
 
 # --- Validation des coupes de condensation --------------------------------------------------------------------
@@ -711,7 +795,7 @@ def _english(s, a: Access, job_id: int, edit: bool = False) -> tuple[Job, EnVers
 @app.get("/api/english", dependencies=[Depends(auth.need("jobs.view"))])
 def english_info(request: Request, s=Depends(db), a: Access = Depends(acl)):
     """Réglages par défaut, état du service de voix, et les versions anglaises en cours ou à valider (visibles par cet utilisateur)."""
-    ens = (s.query(EnVersion).filter(EnVersion.status.in_(["pending", "running", "review"]), EnVersion.job_id.in_(a.jobs(s.query(Job.id))))
+    ens = (s.query(EnVersion).filter(EnVersion.status.in_(["pending", "running", "review", "paused"]), EnVersion.job_id.in_(a.jobs(s.query(Job.id))))
            .order_by(EnVersion.created_at).all())
     jobs = {j.id: j for j in s.query(Job).filter(Job.id.in_([e.job_id for e in ens]))} if ens else {}
     return {"alive": _voicelab_alive(s), "defaults": english.defaults(s), "can_create": has_perm(request.state.user, "english.create"),
@@ -761,6 +845,38 @@ def request_english(job_id: int, body: EnglishIn, s=Depends(db), a: Access = Dep
     if body.ref_start is not None and not 0 <= body.ref_start <= (job.duration_output or 0) - REF_SECONDS:
         raise HTTPException(400, f"La voix de référence ({int(REF_SECONDS)} s) doit tenir dans le podcast")
     english.queue(s, job, body.mode, a.user.username, translator, engine, body.ref_start)
+    return job_dict(job, s=s, a=a)
+
+
+@app.post("/api/jobs/{job_id}/english/stop", dependencies=[Depends(auth.need("english.create"))])
+def stop_english(job_id: int, s=Depends(db), a: Access = Depends(acl)):
+    """Arrête la version anglaise en attente, à valider ou en cours."""
+    job, en = _english(s, a, job_id, edit=True)
+    if not en:
+        raise HTTPException(404, "Pas de version anglaise")
+    was = en.status
+    _stop(s, EnVersion, en, "version anglaise", a.user.username)
+    if was in ("pending", "review", "paused"):
+        english.drop_files(en)
+    return job_dict(job, s=s, a=a)
+
+
+@app.post("/api/jobs/{job_id}/english/pause", dependencies=[Depends(auth.need("english.create"))])
+def pause_english(job_id: int, s=Depends(db), a: Access = Depends(acl)):
+    job, en = _english(s, a, job_id, edit=True)
+    if not en:
+        raise HTTPException(404, "Pas de version anglaise")
+    _pause(s, EnVersion, en, "version anglaise", a.user.username)
+    return job_dict(job, s=s, a=a)
+
+
+@app.post("/api/jobs/{job_id}/english/resume", dependencies=[Depends(auth.need("english.create"))])
+def resume_english(job_id: int, s=Depends(db), a: Access = Depends(acl)):
+    """Reprend la version anglaise là où elle s'était arrêtée : le texte traduit et les morceaux de voix déjà faits sont gardés."""
+    job, en = _english(s, a, job_id, edit=True)
+    if not en:
+        raise HTTPException(404, "Pas de version anglaise")
+    _resume(s, EnVersion, en, "version anglaise", a.user.username)
     return job_dict(job, s=s, a=a)
 
 
@@ -890,6 +1006,8 @@ def retry_job(job_id: int, body: RetryIn, s=Depends(db), a: Access = Depends(acl
     if body.english_translator is not None:
         job.english_translator = _check_translator(s, a, body.english_translator)
     job.review_json, job.review_ok = None, False  # une relance repart de l'analyse : l'ancienne proposition de coupes ne vaut plus
+    shutil.rmtree(config.WORK_DIR / str(job.id), ignore_errors=True)  # et du travail gardé : un dossier vide = un nouveau passage
+    job.stop_requested = job.pause_requested = False
     job.status, job.step, job.progress, job.error = "pending", "En attente", 0.0, None
     job.updated_at = datetime.utcnow()  # repart en fin de file
     job.log = (job.log or "") + f"\n--- Relancé le {datetime.now():%d/%m/%Y %H:%M} ---\n"
@@ -903,6 +1021,9 @@ def delete_job(job_id: int, s=Depends(db), a: Access = Depends(acl)):
     job = a.need_job(s, job_id, edit=True)
     if job.status == "running":
         raise HTTPException(400, "Impossible de supprimer un traitement en cours")
+    if job.status == "paused":  # le travail gardé ne servira plus
+        shutil.rmtree(config.WORK_DIR / str(job.id), ignore_errors=True)
+        job.status, job.step, job.error = "error", "Abandonné", "Mis à la corbeille pendant la pause"
     job.deleted_at, job.deleted_by = datetime.utcnow(), a.user.username
     s.commit()
     return {"ok": True}

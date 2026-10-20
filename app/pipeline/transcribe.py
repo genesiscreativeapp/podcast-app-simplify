@@ -7,6 +7,7 @@ Pour aller vite sur un culte de 4 h 30 :
 - les lots de la passe fine sont coupés dans un creux de parole, jamais au milieu d'un mot.
 Les modèles restent en mémoire entre deux traitements.
 """
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -49,6 +50,21 @@ class _Progress:
             self.done += seconds
             if self.cb:
                 self.cb(min(self.done / self.total, 1.0))
+
+
+def _batch(cache_dir: Path | None, name: str, progress: "_Progress", seconds: float, compute: Callable[[], list]) -> list:
+    """Résultat d'un lot : relu s'il a été calculé avant une pause, sinon calculé puis enregistré (jamais de fichier à moitié écrit)."""
+    f = cache_dir / name if cache_dir else None
+    if f and f.exists():
+        progress.add(seconds)
+        return json.loads(f.read_text())
+    out = compute()
+    if f:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_suffix(".tmp")
+        tmp.write_text(json.dumps(out))
+        tmp.replace(f)
+    return out
 
 
 def _segments(model_name: str, audio: np.ndarray, words: bool, beam: int, prompt: str | None = None):
@@ -94,33 +110,38 @@ def _batches(wav: Path, duration: float) -> list[tuple[float, float]]:
     return list(zip(cuts, cuts[1:]))
 
 
-def transcribe_words(wav16: Path, duration: float,
-                     on_progress: Callable[[float], None] | None = None) -> list[dict]:
-    """Passe fine, mot à mot, sur toute la prédication. Retourne des segments {start, end, text, words}."""
+def transcribe_words(wav16: Path, duration: float, on_progress: Callable[[float], None] | None = None,
+                     cache_dir: Path | None = None) -> list[dict]:
+    """Passe fine, mot à mot, sur toute la prédication. Retourne des segments {start, end, text, words}.
+    `cache_dir` : chaque lot terminé y est enregistré, une reprise après une pause ne refait que les lots manquants."""
     progress = _Progress(duration, on_progress)
 
     def task(span):
         a, b = span
-        audio = _read(wav16, a, b - a)
-        out, last = [], 0.0
-        for seg in _segments(config.WHISPER_MODEL_EDIT, audio, True, config.WHISPER_BEAM_EDIT,
-                             config.WHISPER_PROMPT):
-            out.append({
-                "start": a + seg.start, "end": a + seg.end, "text": seg.text.strip(),
-                "words": [{"start": a + w.start, "end": a + w.end, "word": w.word}
-                          for w in (seg.words or [])],
-            })
-            progress.add(seg.end - last)
-            last = seg.end
-        progress.add(max((b - a) - last, 0.0))  # fin de lot : le reste était du silence
-        return out
+
+        def compute():
+            audio = _read(wav16, a, b - a)
+            out, last = [], 0.0
+            for seg in _segments(config.WHISPER_MODEL_EDIT, audio, True, config.WHISPER_BEAM_EDIT,
+                                 config.WHISPER_PROMPT):
+                out.append({
+                    "start": a + seg.start, "end": a + seg.end, "text": seg.text.strip(),
+                    "words": [{"start": a + w.start, "end": a + w.end, "word": w.word}
+                              for w in (seg.words or [])],
+                })
+                progress.add(seg.end - last)
+                last = seg.end
+            progress.add(max((b - a) - last, 0.0))  # fin de lot : le reste était du silence
+            return out
+
+        return _batch(cache_dir, f"w{a:.0f}.json", progress, b - a, compute)
 
     with ThreadPoolExecutor(config.WHISPER_WORKERS) as ex:
         return [s for part in ex.map(task, _batches(wav16, duration)) for s in part]
 
 
-def transcribe_sampled(wav16: Path, duration: float,
-                       on_progress: Callable[[float], None] | None = None) -> list[dict]:
+def transcribe_sampled(wav16: Path, duration: float, on_progress: Callable[[float], None] | None = None,
+                       cache_dir: Path | None = None) -> list[dict]:
     """Passe rapide de repérage : ne transcrit que les `DETECT_CLIP` premières secondes de chaque
     fenêtre de 30 s. Les temps retournés sont ceux de la vidéo d'origine."""
     clip = float(min(config.DETECT_CLIP, WINDOW))
@@ -132,6 +153,9 @@ def transcribe_sampled(wav16: Path, duration: float,
 
     def task(k0: int):
         k1 = min(k0 + per_batch, n_windows)
+        return _batch(cache_dir, f"s{k0}.json", progress, (k1 - k0) * WINDOW, lambda: compute(k0, k1))
+
+    def compute(k0: int, k1: int):
         pieces = []
         for k in range(k0, k1):
             audio = _read(wav16, k * WINDOW, clip)

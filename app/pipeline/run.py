@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 from .. import config, english, r2sync, storage
 from ..db import AI_SERVER, AiUsage, Folder, Job, SessionLocal, job_ai, resolve_intro
-from ..utils import fmt_time
+from ..utils import Paused, Stopped, fmt_time
 from . import audio, condense, steps
 from .detect import detect_sermon
 from .download import download
@@ -36,6 +36,26 @@ class Reporter:
             job.updated_at = datetime.utcnow()
             s.commit()
 
+    def _flags(self) -> tuple[bool, bool]:
+        with SessionLocal() as s:
+            row = s.query(Job.stop_requested, Job.pause_requested).filter(Job.id == self.job_id).one_or_none()
+        return (bool(row[0]), bool(row[1])) if row else (False, False)
+
+    def stop_requested(self) -> bool:
+        return self._flags()[0]
+
+    def pause_requested(self) -> bool:
+        return self._flags()[1]
+
+    def check(self):
+        """Interrompt le traitement si l'utilisateur l'a demandé (appelé à chaque étape et à chaque mise à jour d'avancement) :
+        l'arrêt passe avant la pause."""
+        stop, pause = self._flags()
+        if stop:
+            raise Stopped()
+        if pause:
+            raise Paused()
+
     def log(self, message: str):
         line = f"[{datetime.now().strftime('%H:%M:%S')}] {message}\n"
         with SessionLocal() as s:
@@ -60,6 +80,7 @@ class Reporter:
     def step(self, key: str):
         """Démarre une étape : la barre globale se place au début de sa part."""
         label, lo, _hi = steps.BY_KEY[key]
+        self.check()
         self.log(label)
         self._update(step=label, progress=lo)
 
@@ -71,8 +92,16 @@ class Reporter:
             now = time.monotonic()
             if now - self._last > 1:
                 self._last = now
+                self.check()
                 self._update(progress=lo + (hi - lo) * (a + (b - a) * min(max(frac, 0.0), 1.0)))
         return cb
+
+
+def _save(path: Path, data) -> None:
+    """Point de reprise : écrit en entier ou pas du tout (un arrêt brutal ne laisse jamais un fichier à moitié écrit)."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data))
+    tmp.replace(path)
 
 
 MIN_SENTENCES = 20  # en dessous, le texte est trop court pour juger de ce qui est redondant
@@ -102,8 +131,13 @@ def _analyse(rep: Reporter, work: Path, jb, llm: dict | None):
     rep._update(video_title=video_title, duration_source=duration)
     rep.log(f"Vidéo : {video_title} ({fmt_time(duration)})")
 
-    # 3a. Repérage de la prédication
-    if jb.start_ov is not None or jb.end_ov is not None:
+    # 3a. Repérage de la prédication (point de reprise : detect.json)
+    ck = work / "detect.json"
+    if ck.exists():
+        saved = json.loads(ck.read_text())
+        start, end, note = saved["start"], saved["end"], saved["note"]
+        rep.log("Reprise : prédication déjà repérée")
+    elif jb.start_ov is not None or jb.end_ov is not None:
         start = jb.start_ov or 0.0
         end = min(jb.end_ov or duration, duration)
         note = "Bornes saisies manuellement"
@@ -112,7 +146,7 @@ def _analyse(rep: Reporter, work: Path, jb, llm: dict | None):
         rep.log(f"Modèle {config.WHISPER_MODEL_DETECT}, {config.WHISPER_WORKERS} transcription(s) en parallèle")
         wav16 = work / "full16k.wav"
         audio.to_whisper(src, wav16, duration, rep.sub("detect", 0.0, 0.1))
-        segs = transcribe_sampled(wav16, duration, rep.sub("detect", 0.1, 1.0))
+        segs = transcribe_sampled(wav16, duration, rep.sub("detect", 0.1, 1.0), work / "detect_batches")
         wav16.unlink(missing_ok=True)
         if not use_ai:
             rep.log("IA désactivée ou non configurée : repérage par heuristique")
@@ -121,6 +155,7 @@ def _analyse(rep: Reporter, work: Path, jb, llm: dict | None):
         start, end, note = detect_sermon(segs, duration, video_title or jb.title, rep.log, llm, rep.tokens)
     if end - start < 30:
         raise RuntimeError(f"Prédication trop courte détectée ({start:.0f}s → {end:.0f}s)")
+    _save(ck, {"start": start, "end": end, "note": note})
     rep._update(sermon_start=start, sermon_end=end, detection_note=note)
     rep.log(f"Prédication : {fmt_time(start)} → {fmt_time(end)} — {note}")
 
@@ -134,15 +169,25 @@ def _analyse(rep: Reporter, work: Path, jb, llm: dict | None):
     win_start, win_end = start - pad_b, end + pad_a
 
     # 3b. Extraction + amélioration de la voix (un seul passage ffmpeg)
-    rep.step("voice")
     clean = work / "clean.wav"
     clean16 = work / "clean16k.wav"
-    audio.extract_enhanced(src, win_start, win_end, clean, clean16, rep.sub("voice"))
+    if (work / "voice.ok").exists() and clean.exists():
+        rep.log("Reprise : voix déjà extraite")
+    else:
+        rep.step("voice")
+        audio.extract_enhanced(src, win_start, win_end, clean, clean16, rep.sub("voice"))
+        (work / "voice.ok").touch()
 
     # 3c. Transcription fine mot à mot (sur la prédication uniquement, lots en parallèle)
-    rep.step("words")
-    rep.log(f"Modèle {config.WHISPER_MODEL_EDIT}, {config.WHISPER_WORKERS} transcription(s) en parallèle")
-    segs = transcribe_words(clean16, win_end - win_start, rep.sub("words"))
+    wj = work / "words.json"
+    if wj.exists():
+        segs = json.loads(wj.read_text())
+        rep.log("Reprise : transcription mot à mot déjà faite")
+    else:
+        rep.step("words")
+        rep.log(f"Modèle {config.WHISPER_MODEL_EDIT}, {config.WHISPER_WORKERS} transcription(s) en parallèle")
+        segs = transcribe_words(clean16, win_end - win_start, rep.sub("words"), work / "words_batches")
+        _save(wj, segs)
     clean16.unlink(missing_ok=True)
     words = [w for s in segs for w in s["words"]]
     total = win_end - win_start
@@ -153,7 +198,12 @@ def _analyse(rep: Reporter, work: Path, jb, llm: dict | None):
 
     # 3c'. Retrait des témoignages, annonces, chants... (IA)
     extra_cuts, offtopic_note = [], ""
-    if offtopic_on:
+    oj = work / "offtopic.json"
+    if oj.exists():
+        saved = json.loads(oj.read_text())
+        extra_cuts, offtopic_note = [tuple(c) for c in saved["extra_cuts"]], saved["note"]
+        rep.log("Reprise : témoignages et annonces déjà traités")
+    elif offtopic_on:
         rep.step("clean")
         extra_cuts, offtopic_note, ok = find_offtopic(segs, rep.log, llm, rep.tokens)
         if not ok and (pad_b or pad_a):
@@ -166,6 +216,7 @@ def _analyse(rep: Reporter, work: Path, jb, llm: dict | None):
     else:
         extra_cuts = tail_cut
         rep.log("Pas d'IA : témoignages et annonces non retirés")
+    _save(oj, {"extra_cuts": extra_cuts, "note": offtopic_note})
     return clean, words, extra_cuts, offtopic_note
 
 
@@ -206,29 +257,34 @@ def run_job(job_id: int) -> None:
 
     rep = Reporter(job_id, llm and llm["owner"])
     work = config.WORK_DIR / str(job_id)
-    # Coupes validées par l'utilisateur et données d'analyse conservées : on reprend après la condensation, sans rien refaire
-    resume = bool(jb.review_ok and jb.review_json and (work / "analysis.json").exists() and (work / "clean.wav").exists())
-    if not resume:
-        shutil.rmtree(work, ignore_errors=True)
-        work.mkdir(parents=True)
+    # Le travail déjà fait (pause, validation des coupes, redémarrage du serveur) est dans `work` et se reprend là où il s'est arrêté ;
+    # « Relancer » et la création vident ce dossier : un dossier vide est donc un nouveau passage
+    work.mkdir(parents=True, exist_ok=True)
+    if not any(work.iterdir()):
         # consommation de CE passage (un « Relancer » repart de zéro ; le journal garde l'historique)
         rep._update(tokens_in=0, tokens_out=0, review_json=None, review_ok=False)
+        jb.review_ok, jb.review_json = False, None
+    analysis = work / "analysis.json"
+    resume = analysis.exists() and (work / "clean.wav").exists()  # analyse terminée : on reprend après la condensation
     t0 = time.monotonic()
     paused = False
 
     try:
         if resume:
-            saved = json.loads((work / "analysis.json").read_text())
+            saved = json.loads(analysis.read_text())
             words, offtopic_note = saved["words"], saved["offtopic_note"]
             extra_cuts = [tuple(c) for c in saved["extra_cuts"]]
-            clean, review = work / "clean.wav", json.loads(jb.review_json)
-            rep.log("Reprise après validation des coupes")
+            clean = work / "clean.wav"
+            rep.log("Reprise après validation des coupes" if jb.review_ok else "Reprise : analyse déjà faite")
         else:
             clean, words, extra_cuts, offtopic_note = _analyse(rep, work, jb, llm)
+            _save(analysis, {"words": words, "extra_cuts": extra_cuts, "offtopic_note": offtopic_note})
+        if resume and jb.review_json:  # coupes déjà proposées (et validées si l'utilisateur devait le faire)
+            review = json.loads(jb.review_json)
+        else:
             review = _condense(rep, jb, words, extra_cuts, llm) if jb.pct else None
             if review and jb.mode == "review" and review["removed"]:
                 # validation humaine : on garde l'audio nettoyé et l'analyse, le traitement s'arrête ici sans occuper de place
-                (work / "analysis.json").write_text(json.dumps({"words": words, "extra_cuts": extra_cuts, "offtopic_note": offtopic_note}))
                 rep._update(status="review", step="À valider : coupes proposées", progress=steps.BY_KEY["condense"][2],
                             review_json=json.dumps(review), review_ok=False)
                 rep.log("En attente de la validation des coupes proposées")
@@ -239,7 +295,7 @@ def run_job(job_id: int) -> None:
         if review:  # coupes de condensation : toutes celles proposées (automatique) ou celles que l'utilisateur a gardées
             cond_cuts = condense.cuts_for(review["sentences"], review["chosen"])
             cond_note = (f"condensation : {len(cond_cuts)} phrase(s) retirée(s), {fmt_time(sum(b - a for a, b in cond_cuts))} "
-                         f"({review['method']}" + (", validée" if resume else "") + ")")
+                         f"({review['method']}" + (", validée" if jb.review_ok else "") + ")")
             rep._update(review_json=json.dumps(review))
 
         # 3d. Montage : silences, « euh », répétitions
@@ -315,9 +371,18 @@ def run_job(job_id: int) -> None:
             except Exception:  # le podcast français est terminé : un échec ici ne doit pas le marquer en erreur
                 rep.log("Version anglaise non mise en file : " + traceback.format_exc().splitlines()[-1])
     except Exception as exc:
-        rep.log("ERREUR\n" + traceback.format_exc())
-        rep._update(status="error", step="Erreur", error=str(exc)[:2000], review_ok=False,
-                    finished_at=datetime.utcnow())
+        if isinstance(exc, Stopped) or rep.stop_requested():  # yt-dlp ou un autre module peut avoir enveloppé l'exception
+            rep.log("Arrêté à la demande de l'utilisateur")
+            rep._update(status="error", step="Arrêté", error="Arrêté par l'utilisateur", review_ok=False,
+                        finished_at=datetime.utcnow())
+        elif isinstance(exc, Paused) or rep.pause_requested():
+            rep.log("Mis en pause à la demande de l'utilisateur : le travail déjà fait est gardé")
+            rep._update(status="paused", step="En pause")  # la progression reste celle du moment de la pause
+            paused = True
+        else:
+            rep.log("ERREUR\n" + traceback.format_exc())
+            rep._update(status="error", step="Erreur", error=str(exc)[:2000], review_ok=False,
+                        finished_at=datetime.utcnow())
     finally:
         if not config.KEEP_WORK_FILES and not paused:
             shutil.rmtree(work, ignore_errors=True)
@@ -329,7 +394,7 @@ def _prune_cache() -> None:
     Ne touche jamais à celui d'un traitement en cours (plusieurs tournent en parallèle)."""
     with SessionLocal() as s:
         busy = {str(i) for (i,) in s.query(Job.id).filter(
-            (Job.status == "running") | ((Job.status == "pending") & Job.youtube_url.startswith(config.UPLOAD_SCHEME)))}
+            Job.status.in_(["running", "paused"]) | ((Job.status == "pending") & Job.youtube_url.startswith(config.UPLOAD_SCHEME)))}
     dirs = sorted((d for d in config.CACHE_DIR.iterdir() if d.is_dir() and d.name not in busy),
                   key=lambda d: d.stat().st_mtime, reverse=True)
     for d in dirs[config.KEEP_SOURCES:]:

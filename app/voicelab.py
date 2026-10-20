@@ -13,14 +13,15 @@ import subprocess
 import threading
 import time
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import soundfile as sf
 
 from . import config, english, r2sync, storage, voicebench as vb
-from .db import AiUsage, EnVersion, Job, Setting, SessionLocal, VoiceBench, ai_for, init_db
+from .db import AiUsage, EnVersion, Folder, Job, Setting, SessionLocal, VoiceBench, ai_for, init_db, resolve_intro
 from .pipeline import audio
+from .utils import Paused, Stopped
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger("voicelab")
@@ -114,11 +115,53 @@ def _en_say(en_id: int, message: str) -> None:
             s.commit()
 
 
+def _interrupt(en_id: int) -> str | None:
+    """« stop » (l'arrêt passe avant) ou « pause » si l'utilisateur l'a demandé, sinon None."""
+    with SessionLocal() as s:
+        row = s.query(EnVersion.stop_requested, EnVersion.pause_requested).filter(EnVersion.id == en_id).one_or_none()
+    return "stop" if row and row[0] else "pause" if row and row[1] else None
+
+
+def _check(en_id: int) -> None:
+    kind = _interrupt(en_id)
+    if kind == "stop":
+        raise Stopped()
+    if kind == "pause":
+        raise Paused()
+
+
+@contextmanager
+def _stop_guard(en_id: int, grace: float = 20.0):
+    """Arrêt ou pause demandés par l'utilisateur. Le calcul s'interrompt de lui-même entre deux points de contrôle ; s'il est bloqué dans un
+    chargement de modèle ou un très long morceau (rien d'interruptible), le service redémarre après `grace` s (restart: unless-stopped).
+    Une pause garde le travail déjà fait (texte, morceaux de voix) : la reprise ne refait que ce qui manque."""
+    done = threading.Event()
+
+    def loop():
+        while not done.wait(3):
+            kind = _interrupt(en_id)
+            if kind:
+                if done.wait(grace):
+                    return
+                _en_say(en_id, f"{'Arrêt' if kind == 'stop' else 'Pause'} forcé(e) : le calcul ne répond pas, le service redémarre")
+                if kind == "stop":
+                    _en_set(en_id, status="error", step="Arrêté", error="Arrêté par l'utilisateur", finished_at=datetime.utcnow())
+                else:
+                    _en_set(en_id, status="paused", step="En pause", finished_at=datetime.utcnow())
+                os._exit(1)
+
+    threading.Thread(target=loop, daemon=True).start()
+    try:
+        yield
+    finally:
+        done.set()
+
+
 def claim_english() -> int | None:
     """Prend la version anglaise en attente la plus ancienne (nouvelle demande, ou texte validé qui attend sa voix)."""
     with SessionLocal() as s:
         for (en_id,) in s.query(EnVersion.id).filter(EnVersion.status == "pending").order_by(EnVersion.created_at, EnVersion.id).all():
-            claimed = s.query(EnVersion).filter(EnVersion.id == en_id, EnVersion.status == "pending").update({"status": "running", "step": "Démarrage"})
+            claimed = s.query(EnVersion).filter(EnVersion.id == en_id, EnVersion.status == "pending").update({"status": "running", "step": "Démarrage", "stop_requested": False, "pause_requested": False})
             s.commit()
             if claimed:
                 return en_id
@@ -126,6 +169,11 @@ def claim_english() -> int | None:
 
 
 def run_english(en_id: int) -> None:
+    with _stop_guard(en_id):
+        _run_english(en_id)
+
+
+def _run_english(en_id: int) -> None:
     """Texte français du podcast → traduction → (validation éventuelle du texte) → voix du prédicateur → MP3 → R2.
     Reprenable : le texte traduit et chaque morceau de voix terminé sont conservés ; un redémarrage ne refait pas ce qui est fait."""
     with SessionLocal() as s:
@@ -139,6 +187,7 @@ def run_english(en_id: int) -> None:
     work.mkdir(parents=True, exist_ok=True)
 
     def step(label: str, progress: float) -> None:
+        _check(en_id)
         _en_say(en_id, label)
         _en_set(en_id, step=label, progress=progress)
 
@@ -201,6 +250,7 @@ def run_english(en_id: int) -> None:
         if len(todo) < len(parts):
             _en_say(en_id, f"Reprise : {len(parts) - len(todo)} morceau(x) sur {len(parts)} déjà synthétisé(s)")
         for k, i in enumerate(todo):
+            _check(en_id)
             tmp = work / f"part_{i:04d}.tmp.wav"
             sf.write(str(tmp), engine.say(parts[i]), engine.sr, format="WAV")
             tmp.replace(work / f"part_{i:04d}.wav")  # atomique : un morceau n'existe que complet
@@ -214,7 +264,10 @@ def run_english(en_id: int) -> None:
         body, master = work / "body.wav", work / "master.wav"
         sf.write(str(body), vb.assemble([w for w, _ in waves], sr), sr)
         step("Volume et fondu de sortie", 0.91)
-        audio.finalize(body, master)
+        with SessionLocal() as s:  # intro anglaise du dossier (sinon celle par défaut) : jamais l'intro française
+            intro = resolve_intro(s, s.get(Folder, s.get(Job, e["job_id"]).folder_id), None, "en")
+        _en_say(en_id, f"Intro : {intro[1]}" if intro else "Aucune intro anglaise : version sans intro")
+        audio.finalize(body, master, Path(intro[0]) if intro else None)
         step("Compression MP3", 0.94)
         out_dir = config.OUTPUT_DIR / str(e["job_id"])
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -231,6 +284,13 @@ def run_english(en_id: int) -> None:
                 duration_output=audio.probe_duration(mp3), r2_key_mp3=key, error=None, finished_at=datetime.utcnow())
         _en_say(en_id, f"Terminé : {mp3.stat().st_size / 1e6:.1f} Mo")
         shutil.rmtree(work, ignore_errors=True)  # le MP3 suffit : le travail en cours n'a plus d'utilité
+    except Stopped:
+        _en_say(en_id, "Arrêté à la demande de l'utilisateur")
+        _en_set(en_id, status="error", step="Arrêté", error="Arrêté par l'utilisateur", finished_at=datetime.utcnow())
+        shutil.rmtree(work, ignore_errors=True)
+    except Paused:
+        _en_say(en_id, "Mis en pause à la demande de l'utilisateur : le texte et les morceaux de voix déjà faits sont gardés")
+        _en_set(en_id, status="paused", step="En pause", finished_at=datetime.utcnow())
     except Exception as exc:
         log.exception("version anglaise #%d", en_id)
         hint = vb.failure(e["engine"], exc)["hint"]
@@ -313,6 +373,10 @@ def mark_interrupted() -> int:
     d'essai n'est pas repris : il peut durer longtemps, on laisse l'admin le relancer."""
     with SessionLocal() as s:
         s.query(EnVersion).filter(EnVersion.status == "running").update({"status": "pending", "step": "Reprise après redémarrage"})
+        s.query(EnVersion).filter(EnVersion.status == "running", EnVersion.stop_requested).update(
+            {"status": "error", "step": "Arrêté", "error": "Arrêté par l'utilisateur"})
+        s.query(EnVersion).filter(EnVersion.status == "running", EnVersion.pause_requested).update(
+            {"status": "paused", "step": "En pause"})
         n = s.query(VoiceBench).filter(VoiceBench.status == "running").update(
             {"status": "error", "step": "Erreur", "error": "Interrompu par le redémarrage du service : relancez l'essai",
              "finished_at": datetime.utcnow()})
@@ -325,6 +389,19 @@ def _handle_stop(*_):
     _stop = True
 
 
+def expire_paused() -> int:
+    """Abandonne les versions anglaises en pause depuis plus de PAUSE_DAYS jours : leur travail gardé est supprimé."""
+    limit = datetime.utcnow() - timedelta(days=config.PAUSE_DAYS)
+    with SessionLocal() as s:
+        old = s.query(EnVersion).filter(EnVersion.status == "paused", EnVersion.finished_at < limit).all()
+        for en in old:
+            en.status, en.step, en.finished_at = "error", "Pause expirée", datetime.utcnow()
+            en.error = f"En pause depuis plus de {config.PAUSE_DAYS} jours : relancez la version anglaise"
+            english.drop_files(en)
+        s.commit()
+        return len(old)
+
+
 def main() -> None:
     init_db()
     BENCH_DIR.mkdir(parents=True, exist_ok=True)
@@ -334,7 +411,12 @@ def main() -> None:
         log.info("%d essai(s) interrompu(s)", n)
     threading.Thread(target=_heartbeat, daemon=True).start()
     log.info("voicelab prêt")
+    last_expire = 0.0
     while not _stop:
+        if time.monotonic() - last_expire > 3600:
+            last_expire = time.monotonic()
+            if n := expire_paused():
+                log.info("%d version(s) anglaise(s) en pause abandonnée(s) (plus de %d jours)", n, config.PAUSE_DAYS)
         en_id = claim_english()  # les versions anglaises passent avant les essais
         if en_id is not None:
             log.info("version anglaise #%d démarrée", en_id)

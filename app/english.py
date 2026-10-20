@@ -49,7 +49,7 @@ def queue(s, job: Job, mode: str, user: str, translator: str | None = None, engi
     en.created_by, en.mode = user, mode
     en.translator, en.engine, en.ref_start = translator or d["translator"], engine or d["engine"], ref_start
     en.status, en.step, en.progress, en.error, en.log = "pending", "En attente", 0.0, None, ""
-    en.text_json, en.method, en.review_ok = None, None, False
+    en.text_json, en.method, en.review_ok, en.stop_requested, en.pause_requested = None, None, False, False, False
     en.local_mp3 = en.size_mp3 = en.duration_output = en.finished_at = None  # r2_key_mp3 est gardée : le même objet sera remplacé
     en.created_at = datetime.utcnow()
     s.commit()

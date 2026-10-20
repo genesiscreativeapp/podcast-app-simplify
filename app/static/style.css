@@ -594,8 +594,8 @@ button.tw:hover { background: var(--border); } .tw.open { transform: rotate(90de
 .frow.partial label span { font-weight: 600; }
 
 /* Condensation : traitement « à valider » et relecture des coupes */
-.badge.review { background: var(--warn-soft); color: var(--warn); }
-.thumb .dot.review { background: var(--warn); }
+.badge.review, .badge.paused { background: var(--warn-soft); color: var(--warn); }
+.thumb .dot.review, .thumb .dot.paused { background: var(--warn); }
 .ring.review { background: var(--warn-soft); color: var(--warn); }
 .ring.review b { font-size: 22px; }
 .active-card.review { border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); background: linear-gradient(135deg, color-mix(in srgb, var(--warn) 8%, var(--panel)), var(--panel)); }
@@ -653,3 +653,11 @@ button.tw:hover { background: var(--border); } .tw.open { transform: rotate(90de
 .mp-time { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 body.trimming .mini-player { display: none !important; }
 @media (max-width: 820px) { .mini-player { top: 64px; right: 12px; } }
+
+/* En pause : même carte que « en cours », en teinte d'avertissement et sans animation */
+.active-card.paused { border-color: color-mix(in srgb, var(--warn) 45%, var(--border)); }
+.active-card.paused .ring { opacity: .75; }
+.progress.paused > div { background: var(--warn); }
+.pips i.paused::after { content: ""; position: absolute; inset: 0; width: var(--w, 0%); background: var(--warn); border-radius: inherit; }
+.st.paused .st-icon { color: var(--warn); }
+.st.paused .st-name, .st.paused .st-pct { color: inherit; font-weight: 600; }

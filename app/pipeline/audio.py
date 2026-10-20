@@ -19,14 +19,19 @@ def run(cmd: list[str], duration: float | None = None,
     out = []
     with tempfile.TemporaryFile("w+") as err:  # fichier plutôt que pipe : pas de blocage si ffmpeg est bavard
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err, text=True)
-        for line in proc.stdout:
-            if track and line.startswith("out_time_us="):
-                try:
-                    on_progress(min(max(int(line.split("=")[1]) / 1e6 / duration, 0.0), 1.0))
-                except ValueError:  # « N/A » au démarrage
-                    pass
-            else:
-                out.append(line)
+        try:
+            for line in proc.stdout:
+                if track and line.startswith("out_time_us="):
+                    try:
+                        on_progress(min(max(int(line.split("=")[1]) / 1e6 / duration, 0.0), 1.0))
+                    except ValueError:  # « N/A » au démarrage
+                        pass
+                else:
+                    out.append(line)
+        except BaseException:  # arrêt demandé ou autre exception du rappel : ffmpeg ne doit pas continuer seul
+            proc.kill()
+            proc.wait()
+            raise
         if proc.wait() != 0:
             err.seek(0)
             tail = "\n".join(err.read().strip().splitlines()[-15:])

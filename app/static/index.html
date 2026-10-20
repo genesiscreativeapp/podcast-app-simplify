@@ -113,15 +113,16 @@
           <!-- Intros -->
           <section id="introsView" hidden>
             <div class="page-head"><h1>Bibliothèque d'intros</h1></div>
-            <p class="hint">Gérez ici vos intros (fichiers MP3). Chaque traitement peut en utiliser une ; sans choix, on prend l'intro du dossier, sinon l'intro par défaut (★).</p>
+            <p class="hint">Gérez ici vos intros (fichiers MP3). Chaque traitement peut en utiliser une ; sans choix, on prend l'intro du dossier, sinon l'intro par défaut (★). Une intro est française (podcast) ou anglaise (version anglaise) : la version anglaise n'utilise jamais une intro française.</p>
             <div id="introList" class="jobs"></div>
             <form id="introForm" class="card intro-add">
               <h3>Ajouter une intro</h3>
               <div class="row">
                 <label>Nom <input name="name" placeholder="Intro Culte Royal"></label>
+                <label>Langue <select name="lang"><option value="fr">Français (podcast)</option><option value="en">Anglais (version anglaise)</option></select></label>
                 <label>Fichier MP3 <input name="file" type="file" accept=".mp3,audio/mpeg" required></label>
               </div>
-              <label class="check"><input type="checkbox" name="is_default"> Utiliser comme intro par défaut</label>
+              <label class="check"><input type="checkbox" name="is_default"> Utiliser comme intro par défaut de sa langue</label>
               <div class="dialog-foot"><button class="btn" type="submit"><span data-ic="plus"></span> Ajouter</button></div>
             </form>
           </section>

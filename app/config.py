@@ -85,6 +85,8 @@ OFFTOPIC_PAD_AFTER = float(_env("OFFTOPIC_PAD_AFTER", "60"))
 FADE_OUT = float(_env("FADE_OUT", "2.5"))
 END_MARGIN = float(_env("END_MARGIN", "25"))
 REMOVE_FILLERS = _bool("REMOVE_FILLERS", True)
+# Jours après lesquels un traitement en pause est abandonné (son travail en cours, plusieurs centaines de Mo, est supprimé)
+PAUSE_DAYS = int(_env("PAUSE_DAYS", "7"))
 # Retire les réactions du public entre les phrases du prédicateur : applaudissements, rires, « Amen » de l'assemblée
 # Atténuation maximale (dB) de ce qui est bien plus faible que la voix : murmures, souffles, réverbération. 0 = aucune.
 AMBIENT_ATTEN_DB = float(_env("AMBIENT_ATTEN_DB", "10"))

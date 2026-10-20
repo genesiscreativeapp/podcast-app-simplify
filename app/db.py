@@ -95,7 +95,7 @@ class EnVersion(Base):
     translator: Mapped[str] = mapped_column(String(10), default="local")  # local (modèle libre) | claude
     engine: Mapped[str] = mapped_column(String(40), default="chatterbox-turbo")  # moteur de voix
     ref_start: Mapped[float | None] = mapped_column(Float, nullable=True)  # début de la voix de référence dans le podcast ; None = choisi automatiquement
-    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending|running|review|done|error
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending|running|review|paused|done|error
     step: Mapped[str] = mapped_column(String(200), default="En attente")
     progress: Mapped[float] = mapped_column(Float, default=0.0)
     log: Mapped[str] = mapped_column(Text, default="")
@@ -103,6 +103,8 @@ class EnVersion(Base):
     text_json: Mapped[str | None] = mapped_column(Text, nullable=True)  # [{"id", "fr", "en"}] : le texte, modifiable à la relecture
     method: Mapped[str | None] = mapped_column(String(40), nullable=True)  # comment le texte a été traduit
     review_ok: Mapped[bool] = mapped_column(Boolean, default=False)  # texte validé : la synthèse peut commencer
+    stop_requested: Mapped[bool] = mapped_column(Boolean, default=False)  # l'utilisateur a demandé l'arrêt ; le service le lit pendant le calcul
+    pause_requested: Mapped[bool] = mapped_column(Boolean, default=False)  # idem pour la pause : le travail déjà fait est gardé
     local_mp3: Mapped[str | None] = mapped_column(String(500), nullable=True)
     size_mp3: Mapped[int | None] = mapped_column(Integer, nullable=True)
     duration_output: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -135,13 +137,14 @@ class VoiceBench(Base):
 
 
 class Intro(Base):
-    """Bibliothèque d'intros (MP3). Une seule peut être l'intro par défaut."""
+    """Bibliothèque d'intros (MP3), par langue : une seule peut être l'intro par défaut de chaque langue."""
     __tablename__ = "intros"
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(200))
     path: Mapped[str] = mapped_column(String(500))
     duration: Mapped[float | None] = mapped_column(Float, nullable=True)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    lang: Mapped[str] = mapped_column(String(2), default="fr")  # fr : podcast français ; en : version anglaise
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -150,7 +153,8 @@ class Folder(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(200))
     parent_id: Mapped[int | None] = mapped_column(ForeignKey("folders.id"), nullable=True)
-    intro_id: Mapped[int | None] = mapped_column(nullable=True)  # intro de la bibliothèque (sinon : parent)
+    intro_id: Mapped[int | None] = mapped_column(nullable=True)  # intro française de la bibliothèque (sinon : parent)
+    intro_en_id: Mapped[int | None] = mapped_column(nullable=True)  # intro de la version anglaise (sinon : parent)
     created_by: Mapped[str | None] = mapped_column(String(60), nullable=True)  # NULL = créé par l'administration
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # corbeille : NULL = présent
@@ -183,7 +187,7 @@ class Job(Base):
     start_override: Mapped[float | None] = mapped_column(Float, nullable=True)
     end_override: Mapped[float | None] = mapped_column(Float, nullable=True)
 
-    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending|running|review (coupes à valider)|done|error
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending|running|review (coupes à valider)|paused (travail gardé)|done|error
     step: Mapped[str] = mapped_column(String(200), default="En attente")
     progress: Mapped[float] = mapped_column(Float, default=0.0)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -203,6 +207,8 @@ class Job(Base):
     condense_mode: Mapped[str] = mapped_column(String(10), default="auto")
     review_json: Mapped[str | None] = mapped_column(Text, nullable=True)  # phrases, coupes proposées puis choisies
     review_ok: Mapped[bool] = mapped_column(Boolean, default=False)  # coupes validées : le traitement reprend où il s'était arrêté
+    stop_requested: Mapped[bool] = mapped_column(Boolean, default=False)  # l'utilisateur a demandé l'arrêt ; le worker le lit pendant le calcul
+    pause_requested: Mapped[bool] = mapped_column(Boolean, default=False)  # idem pour la pause : le travail déjà fait est gardé
     # Version anglaise : demandée à la création (« auto » : publiée telle quelle ; « review » : l'utilisateur valide d'abord le texte)
     english_mode: Mapped[str] = mapped_column(String(10), default="")
     english_translator: Mapped[str] = mapped_column(String(10), default="")  # "" : réglage de l'administrateur ; local ; claude (notre IA configurée)
@@ -246,7 +252,9 @@ def _init_db() -> None:
                                      ("jobs", "condense_mode", "VARCHAR(10) DEFAULT 'auto'"), ("jobs", "review_json", "TEXT"),
                                      ("jobs", "review_ok", "BOOLEAN DEFAULT 0"), ("jobs", "tokens_in", "INTEGER DEFAULT 0"), ("jobs", "tokens_out", "INTEGER DEFAULT 0"),
                                      ("users", "llm_key", "TEXT"), ("users", "ai_on", "BOOLEAN DEFAULT 1"),
-                                     ("folders", "created_by", "VARCHAR(60)")):
+                                     ("folders", "created_by", "VARCHAR(60)"), ("intros", "lang", "VARCHAR(2) DEFAULT 'fr'"), ("folders", "intro_en_id", "INTEGER"),
+                                     ("jobs", "stop_requested", "BOOLEAN DEFAULT 0"), ("en_versions", "stop_requested", "BOOLEAN DEFAULT 0"),
+                                     ("jobs", "pause_requested", "BOOLEAN DEFAULT 0"), ("en_versions", "pause_requested", "BOOLEAN DEFAULT 0")):
             cols = {r[1] for r in conn.execute(text(f"PRAGMA table_info({table})"))}
             if col not in cols:
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {sql_type}"))
@@ -343,11 +351,13 @@ def folder_path(session, folder: Folder) -> list[str]:
     return list(reversed(names))
 
 
-def resolve_intro(session, folder: Folder | None, intro_id: int | None = None) -> tuple[str, str] | None:
-    """(chemin, nom) de l'intro à utiliser : choix du traitement, sinon intro du dossier ou du parent
-    le plus proche, sinon intro par défaut. None = pas d'intro."""
+def resolve_intro(session, folder: Folder | None, intro_id: int | None = None, lang: str = "fr") -> tuple[str, str] | None:
+    """(chemin, nom) de l'intro à utiliser dans cette langue : choix du traitement, sinon intro du dossier ou du parent
+    le plus proche, sinon intro par défaut de la langue. None = pas d'intro (une intro d'une autre langue n'est jamais prise)."""
     def usable(i):
-        return i if i is not None and Path(i.path).exists() else None
+        return i if i is not None and i.lang == lang and Path(i.path).exists() else None
+
+    field = "intro_en_id" if lang == "en" else "intro_id"
 
     if intro_id == 0:
         return None
@@ -355,8 +365,9 @@ def resolve_intro(session, folder: Folder | None, intro_id: int | None = None) -
     current, seen = folder, set()
     while chosen is None and current is not None and current.id not in seen:
         seen.add(current.id)
-        chosen = usable(session.get(Intro, current.intro_id)) if current.intro_id else None
+        ref = getattr(current, field)
+        chosen = usable(session.get(Intro, ref)) if ref else None
         current = session.get(Folder, current.parent_id) if current.parent_id else None
     if chosen is None:
-        chosen = usable(session.query(Intro).filter(Intro.is_default).first())
+        chosen = usable(session.query(Intro).filter(Intro.is_default, Intro.lang == lang).first())
     return (chosen.path, chosen.name) if chosen else None

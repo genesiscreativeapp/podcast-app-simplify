@@ -35,7 +35,7 @@ TOTAL, SR = t, 8000
 R.audio.probe_duration = lambda p: sf.info(str(p)).duration if str(p).endswith(".wav") else 100.0
 R.audio.extract_enhanced = lambda src, a, b, out, out16, cb=None: (sf.write(str(out), 0.1 * np.sin(2 * np.pi * 220 * np.arange(int(TOTAL * SR)) / SR), SR),
                                                                     sf.write(str(out16), np.zeros(1600), 16000))
-R.transcribe_words = lambda wav, dur, cb=None: [{"start": 0, "end": TOTAL, "text": "", "words": words}]
+R.transcribe_words = lambda wav, dur, cb=None, cache=None: [{"start": 0, "end": TOTAL, "text": "", "words": words}]
 R.audio.finalize = lambda body, out, intro=None, xfade=0.6, on_progress=None: shutil.copy(body, out)
 R.audio.encode_mp3 = lambda src, out, *a, **k: Path(out).write_bytes(b"mp3")
 
@@ -127,13 +127,13 @@ R.run_job(4)
 assert job(4).status == "review" and job(4).review_ok is False and (config.WORK_DIR / "4" / "analysis.json").exists()
 
 # 6. texte trop court pour juger : pas de pause, pas de coupe
-R.transcribe_words = lambda wav, dur, cb=None: [{"start": 0, "end": 3, "text": "", "words": words[:30]}]
+R.transcribe_words = lambda wav, dur, cb=None, cache=None: [{"start": 0, "end": 3, "text": "", "words": words[:30]}]
 new_job(5, 20, "review")
 R.run_job(5)
 assert job(5).status == "done" and "trop court" in job(5).log and "condensation" not in job(5).edit_note
 
 # 7. version anglaise demandée avec le traitement : mise en file à la fin, avec les réglages par défaut
-R.transcribe_words = lambda wav, dur, cb=None: [{"start": 0, "end": TOTAL, "text": "", "words": words}]
+R.transcribe_words = lambda wav, dur, cb=None, cache=None: [{"start": 0, "end": TOTAL, "text": "", "words": words}]
 new_job(6, 0, "auto", "review")
 R.run_job(6)
 with SessionLocal() as s:
@@ -145,4 +145,78 @@ R.run_job(7)
 with SessionLocal() as s:
     en = s.query(EnVersion).filter(EnVersion.job_id == 7).one()
     assert (en.mode, en.translator) == ("auto", "claude")
+
+# 8. pause : le travail déjà fait est gardé, la reprise ne refait que la suite
+def ask_pause(i):
+    with SessionLocal() as s:
+        s.get(Job, i).pause_requested = True
+        s.commit()
+
+
+def resume(i):  # ce que fait POST /api/jobs/{id}/resume
+    with SessionLocal() as s:
+        jj = s.get(Job, i)
+        jj.status, jj.pause_requested = "pending", False
+        s.commit()
+
+
+extracted, transcribed = [], []
+real_extract, real_words = R.audio.extract_enhanced, R.transcribe_words
+
+
+def extract(*a, **k):
+    real_extract(*a, **k)
+    extracted.append(1)
+    if len(extracted) == 1:
+        ask_pause(8)                                                                # pause demandée pendant l'extraction de la voix
+
+
+def words_fn(wav, dur, cb=None, cache=None):
+    transcribed.append(1)
+    return real_words(wav, dur, cb, cache)
+
+
+R.audio.extract_enhanced, R.transcribe_words = extract, words_fn
+new_job(8, 0, "auto")
+R.run_job(8)
+j, work = job(8), config.WORK_DIR / "8"
+assert (j.status, j.step) == ("paused", "En pause") and j.finished_at is None and "Mis en pause" in j.log and "ERREUR" not in j.log
+assert (work / "detect.json").exists() and (work / "voice.ok").exists() and (work / "clean.wav").exists() and not (work / "words.json").exists()
+assert transcribed == []                                                            # la pause a eu lieu avant la transcription
+resume(8)
+R.run_job(8)
+j = job(8)
+assert j.status == "done" and extracted == [1] and transcribed == [1]               # la voix n'est pas extraite deux fois
+assert "Reprise : voix déjà extraite" in j.log and "Reprise : prédication déjà repérée" in j.log and not work.exists()
+assert len(json.loads(j.transcript_json)) == N
+
+# pause pendant la condensation : l'analyse (transcription comprise) est reprise telle quelle
+real_condense, fired = R._condense, []
+
+
+def condense_then_pause(rep, jb, *a):
+    if not fired:
+        fired.append(1)
+        ask_pause(10)
+    return real_condense(rep, jb, *a)
+
+
+R._condense = condense_then_pause
+new_job(10, 10, "auto")
+transcribed.clear()
+R.run_job(10)
+assert job(10).status == "paused" and (config.WORK_DIR / "10" / "analysis.json").exists() and transcribed == [1]
+resume(10)
+R.run_job(10)
+j = job(10)
+assert j.status == "done" and transcribed == [1] and "Reprise : analyse déjà faite" in j.log and "condensation : " in j.edit_note
+R._condense = real_condense
+
+# pause d'un traitement pas encore démarré, puis arrêt pendant la pause : rien ne reste
+new_job(11, 0, "auto")
+with SessionLocal() as s:
+    s.get(Job, 11).pause_requested = True
+    s.commit()
+R.run_job(11)                                                                       # la demande arrive avant la première étape : il se met en pause
+assert job(11).status == "paused"
 print("ok")

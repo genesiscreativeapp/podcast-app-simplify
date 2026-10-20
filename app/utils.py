@@ -2,6 +2,14 @@ import re
 import unicodedata
 
 
+class Stopped(Exception):
+    """L'utilisateur a demandé l'arrêt de l'opération en cours."""
+
+
+class Paused(Exception):
+    """L'utilisateur a demandé la pause de l'opération en cours : le travail déjà fait est gardé."""
+
+
 def slugify(text: str) -> str:
     """'Culte Royal : la foi !' -> 'Culte-Royal-la-foi'"""
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()

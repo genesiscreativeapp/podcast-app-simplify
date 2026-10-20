@@ -41,7 +41,7 @@ def view(progress: float, status: str, skipped=(), table=STEPS) -> list[dict]:
         elif status in ("pending", "review") or progress < lo:  # en attente de validation : le montage n'a pas commencé
             state, pct = "pending", 0
         else:
-            state = "error" if status == "error" else "active"
+            state = "error" if status == "error" else "paused" if status == "paused" else "active"
             pct = round(100 * (progress - lo) / (hi - lo))
         out.append({"key": key, "label": label, "state": state, "pct": pct})
     return out

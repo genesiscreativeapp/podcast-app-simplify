@@ -12,7 +12,7 @@ const can = (p) => !!state.me && (state.me.is_admin || state.me.permissions.incl
 const fmtSize = (b) => (b ? (b / 1e6).toFixed(1) + " Mo" : "");
 const fmtDate = (iso) => iso ? new Date(/Z|[+-]\d\d:\d\d$/.test(iso) ? iso : iso + "Z")
   .toLocaleString("fr-FR", { dateStyle: "medium", timeStyle: "short" }) : "—";
-const LABELS = { pending: "En attente", running: "En cours", review: "À valider", done: "Terminé", error: "Erreur" };
+const LABELS = { pending: "En attente", running: "En cours", paused: "En pause", review: "À valider", done: "Terminé", error: "Erreur" };
 
 try { JSON.parse(localStorage.getItem("expanded") || "[]").forEach((id) => state.expanded.add(id)); } catch {}
 const saveExpanded = () => { try { localStorage.setItem("expanded", JSON.stringify([...state.expanded])); } catch {} };
@@ -406,7 +406,7 @@ $("miniPlayer").addEventListener("click", (e) => {
 });
 const loadingLine = (box) => (box.innerHTML = '<div class="loading-line"><span class="spinner"></span> Chargement…</div>');
 
-const STEP_ICON = { done: "✓", active: "●", pending: "○", skipped: "–", error: "!" };
+const STEP_ICON = { done: "✓", active: "●", paused: "⏸", pending: "○", skipped: "–", error: "!" };
 function renderSteps(j, open = false, key = "steps") {
   const rows = j.steps.map((s, i) => `
     <li class="st ${s.state}">
@@ -434,16 +434,35 @@ function liveBlock(j) {  // rang dans la file, ou barre globale s'il tourne
     const note = j.step && j.step !== "En attente" ? ` · ${esc(j.step)}` : "";
     return `<div class="queued">${ic("clock")} En file d'attente — <b>n° ${j.queue_position}</b>${note}</div>`;
   }
+  if (j.status === "paused") {
+    const pct = Math.round(j.progress * 100);
+    return `<div class="progress paused"><div style="width:${pct}%"></div></div>
+      <div class="step"><b>⏸ En pause à ${pct} %</b> — le travail déjà fait est gardé ; « Reprendre » continue là où le traitement s'est arrêté</div>${tokensLine(j)}`;
+  }
   if (j.status !== "running") return "";
   const pct = Math.round(j.progress * 100);
   return `<div class="progress"><div style="width:${pct}%"></div></div>
     <div class="step"><b>Global ${pct}%</b> — ${esc(j.step)}</div>${tokensLine(j)}`;
 }
 
-const isLive = (j) => j.status === "pending" || j.status === "running";
+const isLive = (j) => j.status === "pending" || j.status === "running" || j.status === "paused";
+// Arrêter une opération en attente, à valider ou en cours (traitement : act "stop" ; version anglaise : "enstop", `id` = le podcast)
+const stopBtn = (x, id, act = "stop") => x.stopping
+  ? '<button class="btn small ghost" disabled>Arrêt en cours…</button>'
+  : `<button class="btn small ghost danger" data-act="${act}" data-id="${id}">■ Arrêter</button>`;
+const canStop = (j) => ["pending", "running", "review", "paused"].includes(j.status) && can("jobs.create") && editable(j);
+// Pause (le travail déjà fait est gardé) et reprise : traitement = actions "pause" / "resume", version anglaise = "enpause" / "enresume" (id = le podcast)
+const pauseBtn = (x, id, act = "pause") => x.pausing
+  ? '<button class="btn small ghost" disabled>Pause en cours…</button>'
+  : `<button class="btn small ghost" data-act="${act}" data-id="${id}">⏸ Pause</button>`;
+const resumeBtn = (id, act = "resume") => `<button class="btn small" data-act="${act}" data-id="${id}">▶ Reprendre</button>`;
+const pauseCtl = (x, id, prefix = "", allowed = true) => !allowed || x.stopping ? ""
+  : x.status === "paused" ? resumeBtn(id, prefix + "resume")
+  : ["pending", "running"].includes(x.status) ? pauseBtn(x, id, prefix + "pause") : "";
+const jobPauseCtl = (j) => pauseCtl(j, j.id, "", can("jobs.create") && editable(j));
 
 // Version anglaise : état à côté du podcast, et les actions utiles directement dans la liste
-const EN_LABEL = { pending: "en attente", running: "en cours", review: "à valider", done: "prête", error: "erreur" };
+const EN_LABEL = { pending: "en attente", running: "en cours", paused: "en pause", review: "à valider", done: "prête", error: "erreur" };
 const enBadge = (j) => j.english ? `<span class="badge ${j.english.status}" title="Version anglaise : ${EN_LABEL[j.english.status]}">EN · ${EN_LABEL[j.english.status]}${j.english.status === "running" ? ` ${Math.round(j.english.progress * 100)} %` : ""}</span>` : "";
 const canEnglish = (j) => j.status === "done" && j.has_mp3 && can("english.create") && editable(j);
 const enActions = (j) => {
@@ -464,6 +483,7 @@ function jobActions(j, { detail = true, play = false } = {}) {
     ${enActions(j)}
     ${j.has_mp3 ? `<a class="btn small" href="/api/jobs/${j.id}/file/mp3?download=true">${ic("download")} Télécharger MP3</a>` : ""}
     ${j.on_r2 ? `<button class="btn small ghost" data-act="link" data-id="${j.id}">${ic("link")} Copier le lien</button>` : ""}
+    ${jobPauseCtl(j)}${canStop(j) ? stopBtn(j, j.id) : ""}
     ${detail ? `<button class="btn small ghost" data-act="detail" data-id="${j.id}">${ic("info")} Détails</button>` : ""}
     ${j.status === "done" && j.has_mp3 && can("jobs.trim") && editable(j) ? `<button class="btn small ghost" data-act="trim" data-id="${j.id}">${ic("scissors")} Rogner</button>` : ""}
     ${(j.status === "done" || j.status === "error") && can("jobs.create") && editable(j) ? `<button class="btn small ghost" data-act="retry" data-id="${j.id}">${ic("retry")} Relancer</button>` : ""}
@@ -478,6 +498,7 @@ function activeCard(j) {
       <div class="ac-title">${esc(j.title)} <span class="muted">· ${esc(j.date)}</span></div>
       <div class="ac-sub">${sub}</div>`;
   const actions = `<div class="ac-actions"><span class="by">${j.from_upload ? ic("upload") + " Fichier envoyé" : ""}</span>
+      ${jobPauseCtl(j)}${canStop(j) ? stopBtn(j, j.id) : ""}
       <button class="btn small ghost" data-act="detail" data-id="${j.id}">${ic("info")} Détails</button></div>`;
   if (j.status === "review") {
     const mine = can("jobs.create") && editable(j);
@@ -485,6 +506,7 @@ function activeCard(j) {
       <div class="ring review"><b>✋</b></div>
       ${head}<div class="ac-step"><b>À valider</b> <small>· ${j.condense_pct} % de réduction visés : relisez les coupes proposées</small></div></div>
       <div class="ac-actions"><span class="by"></span>${mine ? `<button class="btn small" data-act="review" data-id="${j.id}">${ic("scissors")} Relire les coupes</button>` : ""}
+        ${canStop(j) ? stopBtn(j, j.id) : ""}
         <button class="btn small ghost" data-act="detail" data-id="${j.id}">${ic("info")} Détails</button></div></div>`;
   }
   if (j.status === "pending") {
@@ -494,10 +516,11 @@ function activeCard(j) {
       ${actions}</div>`;
   }
   const pct = Math.round(j.progress * 100);
-  return `<div class="active-card running" data-id="${j.id}">
+  const paused = j.status === "paused";
+  return `<div class="active-card ${paused ? "paused" : "running"}" data-id="${j.id}">
     <div class="ring" style="--p:${pct}"><b>${pct}<small>%</small></b></div>
     ${head}
-      <div class="ac-step"><span class="live"></span><b>${esc(j.step)}</b>${stepNo(j.steps)}</div>
+      <div class="ac-step">${paused ? "⏸" : '<span class="live"></span>'}<b>${esc(j.step)}</b>${paused ? "" : stepNo(j.steps)}</div>
       ${pips(j.steps)}
       ${tokensLine(j)}
     </div>
@@ -508,7 +531,7 @@ function activeCard(j) {
 function enCard(e) {
   const head = `<div class="ac-main"><div class="ac-title">🇬🇧 ${esc(e.title)} <span class="muted">· ${esc(e.date)} · version anglaise</span></div>
       <div class="ac-sub">${e.folder_path ? ic("folder") + " " + esc(e.folder_path) : ""}${e.created_by ? ` · par ${esc(e.created_by)}` : ""}</div>`;
-  const detail = `<button class="btn small ghost" data-act="detail" data-id="${e.job_id}">${ic("info")} Détails</button>`;
+  const detail = `${pauseCtl(e, e.job_id, "en", e.can_edit && can("english.create"))}${e.can_edit && can("english.create") ? stopBtn(e, e.job_id, "enstop") : ""}<button class="btn small ghost" data-act="detail" data-id="${e.job_id}">${ic("info")} Détails</button>`;
   if (e.status === "review") {
     return `<div class="active-card review" data-en="${e.id}"><div class="ring review"><b>✋</b></div>${head}
       <div class="ac-step"><b>Texte anglais à valider</b> <small>· la voix du prédicateur le dira tel quel</small></div></div>
@@ -519,8 +542,9 @@ function enCard(e) {
       <div class="ac-step">${ic("clock")} En attente du service de voix${state.enAlive ? "" : " <small>· il n'est pas démarré</small>"}</div></div><div class="ac-actions"><span class="by"></span>${detail}</div></div>`;
   }
   const pct = Math.round(e.progress * 100);
-  return `<div class="active-card running" data-en="${e.id}"><div class="ring" style="--p:${pct}"><b>${pct}<small>%</small></b></div>${head}
-    <div class="ac-step"><span class="live"></span><b>${esc(e.step)}</b>${stepNo(e.steps)}</div>
+  const paused = e.status === "paused";
+  return `<div class="active-card ${paused ? "paused" : "running"}" data-en="${e.id}"><div class="ring" style="--p:${pct}"><b>${pct}<small>%</small></b></div>${head}
+    <div class="ac-step">${paused ? "⏸" : '<span class="live"></span>'}<b>${esc(e.step)}</b>${paused ? "" : stepNo(e.steps)}</div>
     ${pips(e.steps)}</div><div class="ac-actions"><span class="by"></span>${detail}</div></div>`;
 }
 
@@ -551,8 +575,8 @@ async function copyLink(url, label = "Lien copié") {
   catch { await modal({ title: "Lien de téléchargement", body: `<input readonly value="${esc(url)}" onfocus="this.select()">`, buttons: [{ label: "Fermer", primary: true }] }); }
 }
 
-function introOptions(first, withNone = false, selected = "") {
-  const opts = [...first, ...state.intros.map((i) => [String(i.id), i.name + (i.is_default ? " ★ par défaut" : "")])];
+function introOptions(first, withNone = false, selected = "", lang = "fr") {
+  const opts = [...first, ...state.intros.filter((i) => i.lang === lang).map((i) => [String(i.id), i.name + (i.is_default ? " ★ par défaut" : "")])];
   if (withNone) opts.push(["0", "Aucune intro"]);
   return opts.map(([v, l]) => `<option value="${esc(v)}" ${String(selected) === v ? "selected" : ""}>${esc(l)}</option>`).join("");
 }
@@ -586,6 +610,22 @@ async function handleAction(act, id, btn) {
       await api(`/api/jobs/${id}/english`, { method: "DELETE" });
       toast("Version anglaise supprimée", "ok");
       refreshView();
+    } else if (act === "stop" || act === "enstop") {
+      const en = act === "enstop";
+      if (!(await confirmBox({ title: en ? "Arrêter la version anglaise ?" : "Arrêter ce traitement ?", danger: true, confirmLabel: "Arrêter",
+        message: `« <b>${esc(job?.title || "Ce podcast")}</b> » : ce qui a été calculé jusqu'ici est perdu${en ? " (le texte anglais aussi)" : ""} ; « Relancer » repart de zéro.`
+          + (en ? " L'arrêt est pris en compte entre deux morceaux de voix ; si le calcul ne répond pas, le service de voix redémarre." : " L'arrêt est pris en compte en quelques secondes.") }))) return;
+      await api(`/api/jobs/${id}/${en ? "english/stop" : "stop"}`, { method: "POST" });
+      toast("Arrêt demandé", "ok");
+      refreshView(); loadStatus();
+    } else if (act === "pause" || act === "enpause") {
+      await api(`/api/jobs/${id}/${act === "enpause" ? "english/pause" : "pause"}`, { method: "POST" });
+      toast("Pause demandée : elle prend effet en quelques secondes", "ok");
+      refreshView(); loadStatus();
+    } else if (act === "resume" || act === "enresume") {
+      await api(`/api/jobs/${id}/${act === "enresume" ? "english/resume" : "resume"}`, { method: "POST" });
+      toast("Reprise demandée", "ok");
+      refreshView(); loadStatus();
     } else if (act === "retry") await retryDialog(job);
     else if (act === "trim") await trimDialog(job);
     else if (act === "rename") await renameJob(job);
@@ -1060,6 +1100,7 @@ const plural = (n, one, many) => `${n} ${n > 1 ? many : one}`;
 function jobMeta(j) {
   if (j.status === "running") return `${Math.round(j.progress * 100)} % — ${esc(j.step)}`;
   if (j.status === "pending") return `En file n° ${j.queue_position}`;
+  if (j.status === "paused") return `En pause à ${Math.round(j.progress * 100)} %`;
   if (j.status === "review") return "À valider";
   if (j.status === "error") return "Erreur";
   return [j.duration_output, fmtSize(j.size_mp3)].filter(Boolean).join(" · ");
@@ -1199,23 +1240,27 @@ async function deleteFolder(f) {
 async function folderIntroDialog(f) {
   const r = await modal({
     title: `Intro du dossier « ${f.name} »`,
-    body: `<label>Intro utilisée pour les podcasts de ce dossier<select name="intro">${introOptions([["", "Hériter (parent, sinon intro par défaut)"]], false, f.intro_id ?? "")}</select></label>
-      <div data-note class="hint"></div><div data-preview></div>
+    body: `<label>Intro des podcasts de ce dossier (français)<select name="intro">${introOptions([["", "Hériter (parent, sinon intro par défaut)"]], false, f.intro_id ?? "")}</select></label>
+      <div data-note="fr" class="hint"></div><div data-preview="fr"></div>
+      <label>Intro de la version anglaise<select name="intro_en">${introOptions([["", "Hériter (parent, sinon intro anglaise par défaut)"]], false, f.intro_en_id ?? "", "en")}</select></label>
+      <div data-note="en" class="hint"></div><div data-preview="en"></div>
       <a class="page-link" data-go="intros" href="#intros">Gérer la bibliothèque d'intros →</a>`,
     buttons: [{ label: "Annuler", kind: "ghost", value: null }, { label: "Enregistrer", primary: true }],
     onMount: (dlg) => {
-      const sel = dlg.querySelector("[name=intro]");
-      const refresh = () => {
-        const chosen = sel.value ? { id: +sel.value, name: introName(+sel.value) } : effectiveIntro(byId(f.parent_id));
-        dlg.querySelector("[data-note]").textContent = sel.value ? "" : chosen ? `Hérité : ${chosen.name}` : "Aucune intro à hériter : ajoutez un MP3 dans la bibliothèque d'intros.";
-        dlg.querySelector("[data-preview]").innerHTML = chosen ? `<audio controls preload="none" src="/api/intros/${chosen.id}/audio" style="width:100%"></audio>` : "";
-      };
-      sel.onchange = refresh; refresh();
+      for (const [lang, name] of [["fr", "intro"], ["en", "intro_en"]]) {
+        const sel = dlg.querySelector(`[name=${name}]`);
+        const refresh = () => {
+          const chosen = sel.value ? { id: +sel.value, name: introName(+sel.value) } : effectiveIntro(byId(f.parent_id), lang);
+          dlg.querySelector(`[data-note=${lang}]`).textContent = sel.value ? "" : chosen ? `Hérité : ${chosen.name}` : "Aucune intro à hériter : ajoutez un MP3 dans la bibliothèque d'intros.";
+          dlg.querySelector(`[data-preview=${lang}]`).innerHTML = chosen ? `<audio controls preload="none" src="/api/intros/${chosen.id}/audio" style="width:100%"></audio>` : "";
+        };
+        sel.onchange = refresh; refresh();
+      }
       dlg.querySelector("[data-go]").onclick = (ev) => { ev.preventDefault(); dlg.querySelector("[data-close]").click(); go("intros"); };
     },
     submit: async (dlg) => {
-      const v = dlg.querySelector("[name=intro]").value;
-      await api(`/api/folders/${f.id}/intro`, { method: "PUT", body: { intro_id: v ? +v : null } });
+      const v = dlg.querySelector("[name=intro]").value, en = dlg.querySelector("[name=intro_en]").value;
+      await api(`/api/folders/${f.id}/intro`, { method: "PUT", body: { intro_id: v ? +v : null, intro_en_id: en ? +en : null } });
       return true;
     },
   });
@@ -1401,13 +1446,14 @@ async function loadJobs() {
 
 // ---------- Intros (bibliothèque MP3) ----------
 const introName = (id) => state.intros.find((i) => i.id === id)?.name;
-const defaultIntro = () => state.intros.find((i) => i.is_default);
+const defaultIntro = (lang = "fr") => state.intros.find((i) => i.is_default && i.lang === lang);
 
-function effectiveIntro(folder) {  // intro du dossier, sinon du parent le plus proche, sinon par défaut
+function effectiveIntro(folder, lang = "fr") {  // intro du dossier dans cette langue, sinon du parent le plus proche, sinon par défaut
+  const key = lang === "en" ? "intro_en_id" : "intro_id";
   for (let f = folder; f; f = f.parent_id ? byId(f.parent_id) : null) {
-    if (f.intro_id && introName(f.intro_id)) return { name: introName(f.intro_id), id: f.intro_id, from: f };
+    if (f[key] && introName(f[key])) return { name: introName(f[key]), id: f[key], from: f };
   }
-  const d = defaultIntro();
+  const d = defaultIntro(lang);
   return d ? { name: d.name, id: d.id, from: null } : null;
 }
 
@@ -1456,7 +1502,8 @@ function renderIntroList() {
     <div class="job intro-item">
       <div class="top">
         <div><b>${esc(i.name)}</b> <span class="muted">${esc(i.duration)}</span>
-          ${i.is_default ? '<span class="badge default">Par défaut</span>' : ""}</div>
+          <span class="badge">${i.lang === "en" ? "🇬🇧 Anglais" : "🇫🇷 Français"}</span>
+          ${i.is_default ? `<span class="badge default">Par défaut (${i.lang === "en" ? "anglais" : "français"})</span>` : ""}</div>
         ${manage ? `<div class="actions">
           ${i.is_default ? "" : `<button class="btn small ghost" data-intro="default" data-id="${i.id}">★ Par défaut</button>`}
           <button class="btn small ghost" data-intro="rename" data-id="${i.id}">Renommer</button>
@@ -1464,7 +1511,7 @@ function renderIntroList() {
         </div>` : ""}
       </div>
       <audio controls preload="none" src="/api/intros/${i.id}/audio"></audio>
-    </div>`).join("") : '<p class="muted">Aucune intro. Ajoutez un fichier MP3 ci-dessous : la première devient l\'intro par défaut.</p>';
+    </div>`).join("") : '<p class="muted">Aucune intro. Ajoutez un fichier MP3 ci-dessous : la première de chaque langue devient l\'intro par défaut de cette langue.</p>';
 }
 
 
@@ -1501,6 +1548,7 @@ $("introForm").onsubmit = async (e) => {
   fd.append("file", f.file.files[0]);
   fd.append("name", f.name.value);
   fd.append("is_default", f.is_default.checked);
+  fd.append("lang", f.lang.value);
   await busy(f.querySelector("button[type=submit]"), async () => {
     try {
       await api("/api/intros", { method: "POST", body: fd });
@@ -1845,6 +1893,7 @@ function enBlock(j, admin) {
   const meta = [e.method && `traduit par : ${e.method}`, `moteur : ${e.engine}`, e.duration && `durée ${Math.round(e.duration / 60)} min`, e.size_mp3 && fmtSize(e.size_mp3)].filter(Boolean).join(" · ");
   let body = "";
   if (e.status === "pending") body = `<div class="queued">${ic("clock")} En attente du service de voix${state.enAlive === false ? " — il n'est pas démarré" : ""}</div>`;
+  else if (e.status === "paused") body = `<div class="progress paused"><div style="width:${Math.round(e.progress * 100)}%"></div></div><div class="step"><b>⏸ En pause à ${Math.round(e.progress * 100)} %</b> — le texte et les morceaux de voix déjà faits sont gardés</div>`;
   else if (e.status === "running") body = `<div class="progress"><div style="width:${Math.round(e.progress * 100)}%"></div></div><div class="step"><b>${Math.round(e.progress * 100)} %</b> — ${esc(e.step)}</div>`;
   else if (e.status === "review") body = `<div class="review-note"><span>✋ Le texte anglais attend votre relecture : la voix du prédicateur le dira tel quel.</span>${can_ ? `<button class="btn small" data-act="enreview" data-id="${j.id}">${ic("edit")} Relire le texte</button>` : ""}</div>`;
   else if (e.status === "error") body = `<div class="err-box">${esc(e.error || "Erreur")}</div>`;
@@ -1853,6 +1902,7 @@ function enBlock(j, admin) {
   return `${body}${admin ? renderSteps(e, false, "ensteps") : ""}<p class="hint">${esc(meta)}</p>
     <div class="actions">
       ${e.on_r2 ? `<button class="btn small ghost" data-act="enlink" data-id="${j.id}">${ic("link")} Copier le lien R2</button>` : ""}
+      ${pauseCtl(e, j.id, "en", can_)}${can_ && ["pending", "running", "review", "paused"].includes(e.status) ? stopBtn(e, j.id, "enstop") : ""}
       ${can_ && e.status !== "running" ? `<button class="btn small ghost" data-act="english" data-id="${j.id}">${ic("retry")} ${e.status === "done" ? "Régénérer…" : "Relancer…"}</button>` : ""}
       ${admin && e.status !== "running" ? `<button class="btn small ghost danger" data-act="endelete" data-id="${j.id}">${ic("trash")} Supprimer</button>` : ""}
     </div>
@@ -1928,6 +1978,7 @@ async function openDetail(id, silent = false) {
     <div class="dialog-foot">
       ${j.status === "done" && j.has_mp3 && can("jobs.trim") && editable(j) ? `<button class="btn ghost" data-act="trim" data-id="${j.id}">${ic("scissors")} Rogner</button>` : ""}
       ${(j.status === "done" || j.status === "error") && can("jobs.create") && editable(j) ? `<button class="btn ghost" data-act="retry" data-id="${j.id}">Relancer</button>` : ""}
+      ${jobPauseCtl(j).replace("btn small", "btn")}${canStop(j) ? stopBtn(j, j.id).replace("btn small", "btn") : ""}
       ${j.status !== "running" && can("jobs.delete") && editable(j) ? `<button class="btn ghost danger" data-act="delete" data-id="${j.id}">Supprimer</button>` : ""}
     </div>`;
   $("detailBody").querySelectorAll("details[data-keep]").forEach((d) => {
