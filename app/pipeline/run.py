@@ -247,10 +247,13 @@ def run_job(job_id: int) -> None:
         edited = work / "edited.wav"
         stats = edit_file(clean, edited, words, config.MAX_PAUSE, config.TARGET_PAUSE,
                           config.REMOVE_FILLERS, config.REMOVE_REPEATS, extra_cuts + cond_cuts,
-                          config.REPEAT_MAX_GAP, config.REPEAT_MAX_WORDS)
+                          config.REPEAT_MAX_GAP, config.REPEAT_MAX_WORDS,
+                          config.REMOVE_REACTIONS)
         examples = " ; ".join(f"« {e} »" for e in stats["examples"][:5])
         note = [f"{stats['pauses']} silences raccourcis", f"{stats['fillers']} hésitations retirées",
                 f"{stats['repeats']} répétitions retirées" + (f" (ex. : {examples})" if examples else "")]
+        if stats["reactions"]:
+            note.append(f"{stats['reactions']} réaction(s) du public retirée(s)")
         if offtopic_note:
             note.append(offtopic_note)
         if cond_note:
@@ -260,7 +263,7 @@ def run_job(job_id: int) -> None:
         rep._update(edit_note="\n".join(note))
 
         w_cuts, _ = word_cuts(words, config.REMOVE_FILLERS, config.REMOVE_REPEATS, config.REPEAT_MAX_GAP, config.REPEAT_MAX_WORDS)
-        rep._update(transcript_json=json.dumps(_final_text(words, w_cuts + extra_cuts + cond_cuts), ensure_ascii=False))
+        rep._update(transcript_json=json.dumps(_final_text(words, w_cuts + stats["reaction_cuts"] + extra_cuts + cond_cuts), ensure_ascii=False))
 
         # 4. Intro + normalisation du volume
         rep.step("master")

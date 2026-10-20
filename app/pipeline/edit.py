@@ -5,6 +5,7 @@
 - Les mots parasites et répétitions viennent des horodatages mot à mot.
   Les répétitions d'emphase volontaires (« Amen, amen ! », « Il est fidèle, il est fidèle ! »
   dites avec une pause) sont préservées : seules les répétitions immédiates sont retirées.
+- Les réactions du public (applaudissements, rires, « Amen » de l'assemblée) entre deux phrases du prédicateur sont retirées.
 """
 import re
 import unicodedata
@@ -32,14 +33,16 @@ def _frames_db(audio: np.ndarray, sr: int, frame: float = 0.02) -> np.ndarray:
     return 20 * np.log10(rms + 1e-9)
 
 
+def _smooth_db(audio: np.ndarray, sr: int, frame: float) -> tuple[np.ndarray, float]:
+    """Niveau par trame lissé sur 100 ms (ignore les micro-pics), et seuil sous lequel une trame est « silencieuse »."""
+    db = np.convolve(_frames_db(audio, sr, frame), np.ones(5) / 5, mode="same")
+    p10, p90 = np.percentile(db, 10), np.percentile(db, 90)
+    return db, p10 + 0.3 * (p90 - p10)
+
+
 def silence_cuts(audio: np.ndarray, sr: int, max_pause: float, target_pause: float,
                  frame: float = 0.02) -> list[tuple[float, float]]:
-    db = _frames_db(audio, sr, frame)
-    # lissage sur 100 ms pour ignorer les micro-pics
-    k = 5
-    db = np.convolve(db, np.ones(k) / k, mode="same")
-    p10, p90 = np.percentile(db, 10), np.percentile(db, 90)
-    threshold = p10 + 0.3 * (p90 - p10)
+    db, threshold = _smooth_db(audio, sr, frame)
     quiet = db < threshold
 
     cuts, i, n = [], 0, len(quiet)
@@ -108,6 +111,47 @@ def word_cuts(words: list[dict], remove_fillers: bool, remove_repeats: bool,
     return cuts, stats
 
 
+# Ce que l'assemblée répond : isolés et plus faibles que le prédicateur (micro de proximité), ces mots sont des réactions
+REACTION_WORDS = {"amen", "oui", "alleluia", "hallelujah", "hosanna", "gloire", "merci", "jesus", "ah", "oh", "bravo", "hum"}
+
+
+def reaction_cuts(audio: np.ndarray, sr: int, words: list[dict], target_pause: float, min_gap: float = 1.5,
+                  quiet_db: float = 8.0, frame: float = 0.02) -> list[tuple[float, float]]:
+    """Réactions du public qui ne sont pas la voix du prédicateur :
+    - applaudissements, rires, bruit : un trou de plus de `min_gap` s entre deux mots où le son reste présent
+      est ramené à une pause (la voix du prédicateur n'y est pas, Whisper n'y entend aucun mot) ;
+    - « Amen », « Alléluia »… de l'assemblée : 1 à 4 mots de réaction, isolés (pause de 0,5 s de chaque côté),
+      au moins `quiet_db` dB sous le niveau médian du prédicateur.
+    Limite : une réaction qui couvre la voix du prédicateur ne peut pas être retirée sans séparer les voix."""
+    if not words:
+        return []
+    total, half = len(audio) / sr, target_pause / 2
+    db, threshold = _smooth_db(audio, sr, frame)
+    cuts = []
+    # trous entre mots (début et fin compris : les bornes ±half laissent la pause cible au bord du montage)
+    edges = [-half] + [w["end"] for w in words], [w["start"] for w in words] + [total + half]
+    for a, b in zip(*edges):
+        if b - a >= min_gap:
+            seg = db[int(max(a, 0) / frame):int(min(b, total) / frame)]
+            if len(seg) and np.mean(seg >= threshold) >= 0.4:
+                cuts.append((max(a + half, 0.0), min(b - half, total)))
+
+    level = [20 * np.log10(np.sqrt(np.mean(audio[int(w["start"] * sr):int(w["end"] * sr)].astype(np.float64) ** 2)) + 1e-9)
+             if w["end"] > w["start"] else -120.0 for w in words]
+    speaker = np.median(level)
+    i = 0
+    while i < len(words):
+        j = i + 1
+        while j < len(words) and words[j]["start"] - words[j - 1]["end"] < 0.5:
+            j += 1
+        island = range(i, j)
+        if len(island) <= 4 and all(_norm(words[k]["word"]) in REACTION_WORDS for k in island) \
+                and np.mean([level[k] for k in island]) < speaker - quiet_db:
+            cuts.append((words[i]["start"], words[j - 1]["end"] + 0.12))
+        i = j
+    return cuts
+
+
 def keep_intervals(cuts: list[tuple[float, float]], total: float,
                    min_keep: float = 0.03) -> list[tuple[float, float]]:
     cuts = sorted((max(0.0, s), min(total, e)) for s, e in cuts if e > s)
@@ -161,14 +205,17 @@ def sentence_end(words: list[dict], nominal: float, horizon: float, min_gap: flo
 
 def edit_file(src, dst, words: list[dict], max_pause: float, target_pause: float,
               remove_fillers: bool = True, remove_repeats: bool = True,
-              extra_cuts: list[tuple[float, float]] = (), repeat_gap: float = 1.0, repeat_words: int = 8) -> dict:
+              extra_cuts: list[tuple[float, float]] = (), repeat_gap: float = 1.0, repeat_words: int = 8,
+              remove_reactions: bool = False) -> dict:
     audio, sr = sf.read(str(src), dtype="float32")
     if audio.ndim > 1:
         audio = audio.mean(axis=1)
     total = len(audio) / sr
     s_cuts = silence_cuts(audio, sr, max_pause, target_pause)
     w_cuts, stats = word_cuts(words, remove_fillers, remove_repeats, repeat_gap, repeat_words)
-    keep = keep_intervals(s_cuts + w_cuts + list(extra_cuts), total)
+    r_cuts = reaction_cuts(audio, sr, words, target_pause) if remove_reactions else []
+    stats.update(reactions=len(r_cuts), reaction_cuts=r_cuts)
+    keep = keep_intervals(s_cuts + w_cuts + r_cuts + list(extra_cuts), total)
     if not keep:
         keep = [(0.0, total)]
     result = render(audio, sr, keep)

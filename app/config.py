@@ -85,6 +85,8 @@ OFFTOPIC_PAD_AFTER = float(_env("OFFTOPIC_PAD_AFTER", "60"))
 FADE_OUT = float(_env("FADE_OUT", "2.5"))
 END_MARGIN = float(_env("END_MARGIN", "25"))
 REMOVE_FILLERS = _bool("REMOVE_FILLERS", True)
+# Retire les réactions du public entre les phrases du prédicateur : applaudissements, rires, « Amen » de l'assemblée
+REMOVE_REACTIONS = _bool("REMOVE_REACTIONS", True)
 
 # --- Compression -------------------------------------------------------------
 MP3_BITRATE = _env("MP3_BITRATE", "64k")
